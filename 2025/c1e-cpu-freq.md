@@ -1,0 +1,179 @@
+<!--
+-*- coding: utf-8 -*-
+vim: ts=4 sw=4 tw=100 et ai si
+
+# Copyright (C) 2024-2026 Intel Corporation
+# SPDX-License-Identifier: BSD-3-Clause
+
+Author: Artem Bityutskiy <artem.bityutskiy@linux.intel.com>
+-->
+
+# Measured CPU Frequency and C-states
+
+- **Author**: Artem Bityutskiy
+- **Version**: 1.1
+- **Date**: 2025-08-20
+- **Last updated**: 2026-07-19
+
+## Table of Contents
+
+- [Measured CPU Frequency and C-states](#measured-cpu-frequency-and-c-states)
+  - [Table of Contents](#table-of-contents)
+  - [Introduction](#introduction)
+  - [Assumptions](#assumptions)
+  - [How CPU Frequency is Measured](#how-cpu-frequency-is-measured)
+  - [CPU Frequency and C1](#cpu-frequency-and-c1)
+  - [CPU Frequency and C1E or Deeper C-states](#cpu-frequency-and-c1e-or-deeper-c-states)
+  - [Idle CPU Frequency Measurement Inaccuracy](#idle-cpu-frequency-measurement-inaccuracy)
+  - [Conclusions](#conclusions)
+
+## Introduction
+
+Intel Xeon processors support several idle states (C-states), including C1, C1E, and one or
+two variants of C6. Each idle state offers a distinct balance between power savings and latency.
+
+- **C1** is the shallowest C-state, providing the least amount of power savings but lowest latency
+  (~1μs).
+
+- **C1E** is a deeper C-state, offering more power savings at the cost of increased latency, ~4μs
+  on modern Intel Xeon platforms, such as Granite Rapids and Emerald Rapids.
+
+- **C6** and its variants provide substantially greater power savings, but with much higher latency,
+  typically > ~100μs. The latency depends on the specific C6 variant and the platform.
+
+Intel Xeon users who have previously relied solely on the C1 idle state may observe changes in CPU
+frequency behavior when enabling C1E. Specifically, when the system is mostly idle,
+Linux monitoring tools such as `turbostat` may report lower CPU frequency than anticipated.
+
+This article aims to clarify the reasons behind this phenomenon, focusing on modern Intel Xeon
+platforms, including Sapphire Rapids, Emerald Rapids, Granite Rapids, and Sierra Forest.
+
+## Assumptions
+
+This article assumes that CPU frequency is pinned to a fixed value at or below the base frequency
+(we will use 2GHz in the examples). This can be achieved by setting both the minimum and maximum CPU
+frequency to the same value for all CPUs via the Linux sysfs interface, or by using utilities such
+as `cpupower` or `pepc`.
+
+Pinning the CPU frequency eliminates the non-essential complexities introduced by dynamic frequency
+scaling, making the analysis more straightforward. However, this simplification does not
+fundamentally change the explanations provided in this article.
+
+This article also assumes that the reader has a basic understanding of Linux and Intel CPU idle
+states. For an introduction to some of these concepts, please refer to the
+[C-state Namespaces](cstate-namespaces.md) article.
+
+For simplicity, this article uses C1 and C1E for requestable C-states, and CC1 and CC1E for the
+corresponding hardware C-states.
+
+## How CPU Frequency is Measured
+
+This section explains how CPU frequency is measured, with a focus on the `turbostat` utility,
+a standard tool available on Linux systems. `turbostat` is part of the Linux kernel source tree.
+For example, [this link](https://github.com/torvalds/linux/tree/v6.16/tools/power/x86/turbostat)
+points to the Linux kernel v6.16 `turbostat` source code.
+
+At a high level, `turbostat` periodically wakes up (every 5 seconds by default), captures snapshots
+of various counters, computes the difference between consecutive snapshots, and reports metrics such
+as CPU frequency and C-state residency.
+
+Below is a simplified example of `turbostat` output.
+
+```text
+Busy% Bzy_MHz TSC_MHz  IPC  IRQ    NMI SMI POLL%  C1%   C1E%  C6%
+24.81 3680    2600     2.41 303428 0   0   0.00   1.00  4.02  70.20
+```
+
+The `Bzy_MHz` metric is the CPU frequency in MHz. The `Bzy_` prefix indicates that this value
+reflects the frequency during busy periods, when the CPU is in C0 (executing instructions), not
+when the CPU is in a C-state such as C1 or C1E.
+
+The general formula for CPU frequency measurement is:
+
+**F = (ΔAPERF / ΔMPERF) × F_base**, where:
+
+- **F** is the measured CPU frequency in Hz.
+- **ΔAPERF** is the change (delta) in the APERF counter (MSR 0xE8).
+- **ΔMPERF** is the change (delta) in the MPERF counter (MSR 0xE7).
+- **F_base** is the base frequency of the CPU in Hz.
+
+The APERF counter increments every CPU cycle when the CPU is in the C0 state. The rate of increments
+follows the CPU frequency. For example, if the CPU frequency increases from 1GHz to 2GHz, APERF
+increments twice as fast.
+
+The MPERF counter also increments every CPU cycle only when the CPU is in the C0 state, but unlike
+APERF, its increment rate is tied to the base CPU frequency. This means that regardless of the
+actual CPU frequency, MPERF always increases at a constant rate determined by the processor’s base
+frequency.
+
+Both APERF and MPERF counters increment only while the CPU is in C0. When the CPU enters a C-state,
+these counters stop incrementing until it exits the C-state and returns to C0.
+
+## CPU Frequency and C1
+
+When a CPU exits C1, its frequency is the same as the frequency it was running at before entering
+C1. For example, if the CPU is running at 2GHz, then enters C1, it will run at 2GHz when it exits C1.
+
+The hardware CC1 state (which corresponds to requestable C1) is essentially a clock-gating mechanism:
+the CPU clock is disabled to reduce dynamic power, while the voltage remains unchanged. Upon exiting
+CC1, the clock is re-enabled and the CPU resumes at its previous frequency.
+
+As a result, entering or exiting C1 has no effect on the CPU frequency reported by monitoring tools
+such as `turbostat`. The measured "busy" frequency remains at 2GHz, regardless of whether the CPU
+transitions through C1.
+
+But keep in mind, when measuring a mostly idle system, the reported CPU frequency may be
+noticeably inaccurate due to limitations in the measurement algorithm. This phenomenon will be
+explained in a later section.
+
+## CPU Frequency and C1E or Deeper C-states
+
+When a CPU exits C1E, its frequency may be for a short time below the value it was running at before
+entering C1E.
+
+For example, if the CPU was operating at 2GHz and then entered C1E, it might resume at 1.5GHz upon
+exit. The frequency will then ramp back up to 2GHz while the CPU is already executing instructions.
+
+The hardware CC1E state (which corresponds to requestable C1E) combines clock-gating with voltage
+and frequency scaling. By lowering the CPU voltage in CC1E, the processor achieves additional
+leakage power savings on top of the dynamic power reduction provided by CC1.
+
+Consequently, monitoring tools such as `turbostat` may report a lower-than-expected CPU frequency when
+C1E is enabled. For instance, `turbostat` may report 1.9GHz instead of the expected 2GHz.
+
+But in practice, the CPU ramps its frequency back up so rapidly that the lower frequency is only
+observed on mostly idle systems, where the CPU spends little time in C0 and frequently
+transitions between C0 and C1E. For instance, if the CPU is 5-10% busy, `turbostat` will report
+2GHz, and the C1E-related transient frequency ramps will be indistinguishable from measurement
+noise.
+
+The situation with deeper C-states such as C6 is similar to C1E.
+
+## Idle CPU Frequency Measurement Inaccuracy
+
+The APERF and MPERF counters are two separate MSRs, which means that they are read one after
+another, and there is always a time interval between APERF and MPERF read operations.
+
+Depending on system configuration, `turbostat` reads APERF and MPERF either through the Linux kernel
+MSR driver (`/dev/cpu/cpu*/msr`) or via the perf subsystem. When using the MSR driver, APERF and
+MPERF are read with two separate syscalls. When using the Linux perf subsystem, `turbostat` can read
+both counters in a single syscall by leveraging perf's event grouping feature.
+
+When using the MSR driver, there is a longer time gap between reading APERF and MPERF compared to
+using the perf subsystem.
+
+On mostly idle systems, the changes in APERF and MPERF counters (ΔAPERF and ΔMPERF) during the
+measurement interval can be similar in magnitude to the time gap between reading APERF and MPERF.
+This can introduce substantial inaccuracies in the reported busy CPU frequency.
+
+## Conclusions
+
+1. When C1E is enabled and the system is around 3-5% busy or lower, Linux tools like `turbostat` may
+  report lower-than-expected CPU frequencies due to short transient frequency ramps.
+1. When C1E is enabled and the system is 5-10% busy, the reported CPU frequency aligns with the
+  expected value, because transient C1E effects become negligible.
+1. On mostly idle systems, CPU frequency measurements may be inaccurate due to increased
+  measurement errors.
+
+Finally, the author of this article considers the practice of measuring CPU frequency on a
+mostly idle system to be of limited value and potentially misleading.
