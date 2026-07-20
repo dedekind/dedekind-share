@@ -9,16 +9,16 @@ This repository contains my study notes and articles.
 
 ## Articles
 
-### Vituralization
+### Virtualization
 
 - 2026-06-05: [QEMU/KVM Live Migration](2026/qemu-live-migration.md)
 
-### x86 CPU Architecture
+### Intel CPU Performance Monitoring
 
 - 2025-12-07: [TSC, APERF, and MPERF Counters](2025/tsc-amperf.md)
 - 2025-05-01: [MSR Scope](2025/msr-scope.md)
 
-### Power Management
+### Intel CPU Frequency and Idle States in Linux
 
 - 2026-01-20: [Intel CPU Base Frequency Explained: Definitions and Performance Scaling Fundamentals](2026/cpu-base-freq.md)
 - 2025-09-02: [Intel Xeon Uncore ELC (Efficiency Latency Control)](2025/uncore-elc.md)
