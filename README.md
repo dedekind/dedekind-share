@@ -13,9 +13,12 @@ This repository contains my study notes and articles.
 
 - 2026-06-05: [QEMU/KVM Live Migration](2026/qemu-live-migration.md)
 
-### Intel CPU Performance Monitoring
+### Intel CPU Counters and Clocks
 
 - 2025-12-07: [TSC, APERF, and MPERF Counters](2025/tsc-amperf.md)
+
+### Intel Model Specific Registers
+
 - 2025-05-01: [MSR Scope](2025/msr-scope.md)
 
 ### Intel CPU Frequency and Idle States in Linux
