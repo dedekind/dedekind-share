@@ -11,9 +11,9 @@ Author: Artem Bityutskiy <artem.bityutskiy@linux.intel.com>
 # QEMU/KVM Live Migration
 
 - **Author**: Artem Bityutskiy
-- **Version**: 1.0
+- **Version**: 1.1
 - **Date**: 2026-06-05
-- **Last updated**: 2026-07-19
+- **Last updated**: 2026-07-26
 
 **Disclaimer**: This document describes my understanding of QEMU live migration design, not a
 comprehensive reference. The focus is on QEMU/KVM and traditional VMs. At the time of writing (June
@@ -46,6 +46,9 @@ accordingly.
   - [Pre-Copy Migration](#pre-copy-migration)
     - [Convergence Algorithm](#convergence-algorithm)
     - [Auto-Converge](#auto-converge)
+  - [Post-Copy Migration](#post-copy-migration)
+    - [Switchover and Page Discard](#switchover-and-page-discard)
+    - [Fault-Driven Memory Fetch](#fault-driven-memory-fetch)
   - [Memory State Migration](#memory-state-migration)
   - [CPU State Migration](#cpu-state-migration)
   - [Migration Channels](#migration-channels)
@@ -498,6 +501,53 @@ I -->|No| A
 I -->|Yes| J[Increase CPU throttle]
 J --> A
 ```
+
+---
+
+## Post-Copy Migration
+
+Post-copy migration starts in pre-copy mode. It switches to post-copy only when the operator
+explicitly requests it on the source side, for example with QMP `migrate-start-postcopy`. Without
+this request, migration stays in pre-copy mode. QEMU does not switch to post-copy on its own, but
+a management tool can automate issuing the request. Post-copy is riskier: after switchover, if
+source or destination fails, the VM can be lost and rollback options are limited. Recovery in this
+situation is challenging, see [Error Handling and Recovery](#error-handling-and-recovery). So the
+operator decides when to switch, usually with a recovery plan in place.
+
+At switchover, the source VM stops. QEMU transfers vCPU and device state to the destination. Then
+the destination VM starts. From that point, missing memory pages are fetched on demand, while the
+source also keeps sending remaining pages proactively.
+
+### Switchover and Page Discard
+
+By the time post-copy begins, some pages already received on the destination can be stale because
+the source modified them after transfer, and some pages were never sent. At switchover, the source
+sends discard commands for both sets. The destination applies backend-specific discard operations
+based on RAMBlock backing type:
+
+- Private anonymous mmap: `madvise(MADV_DONTNEED)`.
+- Shared anonymous mmap: `madvise(MADV_REMOVE)`.
+- File-backed or hugetlbfs-backed: `fallocate(FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE)`.
+
+After discard, these pages no longer have physical memory backing. The next guest access to such a
+page causes a page fault, and QEMU retrieves the current page content from the source.
+
+### Fault-Driven Memory Fetch
+
+On the destination, QEMU uses `userfaultfd` to detect missing-page faults and request pages from
+the source:
+
+- Get a `userfaultfd` descriptor.
+- Register RAMBlock ranges with `ioctl(UFFDIO_REGISTER, UFFDIO_REGISTER_MODE_MISSING)`.
+- Wait for page-fault events with `poll()` in the post-copy fault thread.
+
+If a vCPU accesses a missing page:
+
+- The kernel delivers `UFFD_EVENT_PAGEFAULT` to QEMU.
+- The post-copy fault thread sends a page request over the return path.
+- When the page arrives, destination QEMU populates RAMBlock-backed host memory with
+  `ioctl(UFFDIO_COPY)` or `ioctl(UFFDIO_ZEROPAGE)`.
+- The fault is resolved and the blocked vCPU resumes execution.
 
 ---
 
