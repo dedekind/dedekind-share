@@ -49,7 +49,6 @@ accordingly.
   - [Post-Copy Migration](#post-copy-migration)
     - [Switchover and Page Discard](#switchover-and-page-discard)
     - [Fault-Driven Memory Fetch](#fault-driven-memory-fetch)
-  - [Memory State Migration](#memory-state-migration)
   - [CPU State Migration](#cpu-state-migration)
   - [Migration Channels](#migration-channels)
   - [QEMU Threads](#qemu-threads)
@@ -401,8 +400,10 @@ dirty page information for that memslot.
 ## Pre-Copy Migration
 
 Pre-copy migration transfers VM state while the guest continues running on the source host. The
-process is iterative. QEMU sends memory in rounds, and each round transfers pages that were
-modified since the previous round (dirty pages).
+source QEMU reads guest memory directly from its address space and writes it to RAMBlocks on the
+destination. There are no KVM ioctls for per-page guest memory transfer. The process is iterative:
+QEMU sends memory in rounds, and each round transfers pages that were modified since the previous
+round (dirty pages).
 
 QEMU maintains dirty pages bitmap in userspace with one bit per guest memory page. The bitmap is
 organized per RAMBlock. QEMU uses KVM dirty tracking to update this bitmap.
@@ -506,13 +507,9 @@ J --> A
 
 ## Post-Copy Migration
 
-Post-copy migration starts in pre-copy mode. It switches to post-copy only when the operator
-explicitly requests it on the source side, for example with QMP `migrate-start-postcopy`. Without
-this request, migration stays in pre-copy mode. QEMU does not switch to post-copy on its own, but
-a management tool can automate issuing the request. Post-copy is riskier: after switchover, if
-source or destination fails, the VM can be lost and rollback options are limited. Recovery in this
-situation is challenging, see [Error Handling and Recovery](#error-handling-and-recovery). So the
-operator decides when to switch, usually with a recovery plan in place.
+This section covers the post-copy mechanism in more detail. See
+[Pre-copy vs Post-copy](#pre-copy-vs-post-copy) for how post-copy compares with pre-copy and
+[Error Handling and Recovery](#error-handling-and-recovery) for failure semantics.
 
 At switchover, the source VM stops. QEMU transfers vCPU and device state to the destination. Then
 the destination VM starts. From that point, missing memory pages are fetched on demand, while the
@@ -544,24 +541,11 @@ the source:
 If a vCPU accesses a missing page:
 
 - The kernel delivers `UFFD_EVENT_PAGEFAULT` to QEMU.
-- The post-copy fault thread sends a page request over the return path.
+- The post-copy fault thread sends a page request over the return path (see
+  [Migration Channels](#migration-channels)).
 - When the page arrives, destination QEMU populates RAMBlock-backed host memory with
   `ioctl(UFFDIO_COPY)` or `ioctl(UFFDIO_ZEROPAGE)`.
 - The fault is resolved and the blocked vCPU resumes execution.
-
----
-
-## Memory State Migration
-
-Before RAM transfer begins, the destination QEMU already has guest RAM allocated as RAMBlocks. The
-backing can come from different memory backends, for example anonymous mappings, file-backed
-memory, `memfd`, or POSIX shared memory. It also has a compatible guest physical memory layout
-built from `MemoryRegion` objects, and the corresponding KVM memslots created with
-`KVM_SET_USER_MEMORY_REGION` or `KVM_SET_USER_MEMORY_REGION2`.
-
-During migration, the source QEMU uses dirty page tracking. The source QEMU reads guest memory
-directly from its address space, and the destination QEMU writes it directly to RAMBlocks in
-userspace. There are no special KVM ioctls for per-page guest memory reads or writes.
 
 ---
 
