@@ -11,6 +11,7 @@ This repository contains my study notes and articles.
 
 ### Virtualization
 
+- 2026-06-10: [KVM Dirty Page Tracking](2026/kvm-dirty-page-tracking.md)
 - 2026-06-05: [QEMU/KVM Live Migration](2026/qemu-live-migration.md)
 
 ### Intel CPU Counters and Clocks
