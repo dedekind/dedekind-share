@@ -419,6 +419,9 @@ There are two main KVM dirty tracking methods:
 - Bitmap method (default): QEMU gets dirty page information via `KVM_GET_DIRTY_LOG`.
 - Dirty ring method: QEMU reads per-vCPU dirty ring entries.
 
+Refer to [KVM Dirty Page Tracking](./kvm-dirty-page-tracking.md) for more details on KVM dirty
+tracking API.
+
 In bitmap method, QEMU can choose between two modes of page protection:
 
 - Automatic page protection: `KVM_GET_DIRTY_LOG` returns dirty pages and KVM re-arms tracking
