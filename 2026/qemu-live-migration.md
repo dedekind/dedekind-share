@@ -11,9 +11,9 @@ Author: Artem Bityutskiy <artem.bityutskiy@linux.intel.com>
 # QEMU/KVM Live Migration
 
 - **Author**: Artem Bityutskiy
-- **Version**: 1.1
+- **Version**: 1.2
 - **Date**: 2026-06-05
-- **Last updated**: 2026-07-26
+- **Last updated**: 2026-07-30
 
 **Disclaimer**: This document describes my understanding of QEMU live migration design, not a
 comprehensive reference. The focus is on QEMU/KVM and traditional VMs. At the time of writing (June
@@ -46,6 +46,7 @@ accordingly.
   - [Pre-Copy Migration](#pre-copy-migration)
     - [Convergence Algorithm](#convergence-algorithm)
     - [Auto-Converge](#auto-converge)
+      - [Dirty-Rate Sync Timer](#dirty-rate-sync-timer)
   - [Post-Copy Migration](#post-copy-migration)
     - [Switchover and Page Discard](#switchover-and-page-discard)
     - [Fault-Driven Memory Fetch](#fault-driven-memory-fetch)
@@ -503,6 +504,19 @@ I -->|Yes| J[Increase CPU throttle]
 J --> A
 ```
 
+#### Dirty-Rate Sync Timer
+
+When `auto-converge` is enabled, the main loop thread runs a 5-second periodic timer (hardcoded).
+On each tick, it checks whether the migration thread has completed an iteration since the previous
+tick. If not, it reads dirty page information from KVM and merges it into the migration bitmap to
+keep dirty-rate statistics fresh for the throttle logic. The first iteration is excluded from this
+check.
+
+With the bitmap method, the timer callback issues `KVM_GET_DIRTY_LOG`. With the dirty ring method,
+the main loop thread drains the dirty rings itself, without involving the reaper thread.
+
+For more information on QEMU threads, see [QEMU Threads](#qemu-threads).
+
 ---
 
 ## Post-Copy Migration
@@ -626,7 +640,9 @@ with `-device ...,iothread=<id>`. Virtio devices such as `virtio-blk` and `virti
 The main loop thread is QEMU's central control thread with many responsibilities, for example
 handling operator commands, processing timer and event-loop callbacks, and handling signals.
 
-During migration on the source side, the main loop thread handles migration control commands.
+During migration on the source side, the main loop thread handles migration control commands. When
+`auto-converge` is enabled, it also fires the periodic dirty sync timer (see
+[Dirty-Rate Sync Timer](#dirty-rate-sync-timer)).
 
 During migration on the destination side, it handles the `migrate-incoming` command. In pre-copy,
 when `multifd` is disabled, the main loop thread loads both memory and device state from the main
@@ -666,9 +682,17 @@ without destination feedback until it decides to start the switchover.
 This thread is used only when QEMU uses the dirty ring KVM interface, which is not the default
 configuration. In the default bitmap mode, QEMU does not create this thread.
 
-When dirty ring mode is enabled, QEMU creates a dedicated reaper thread on the source side to
-periodically drain per-vCPU dirty ring entries and fold them into QEMU's userspace dirty page
-tracking, so later pre-copy iterations can resend pages dirtied by the guest.
+With KVM dirty ring capability enabled (`KVM_CAP_DIRTY_LOG_RING`, or
+`KVM_CAP_DIRTY_LOG_RING_ACQ_REL` on weakly ordered architectures), QEMU creates a dedicated reaper
+thread on the source side to periodically drain per-vCPU entries and fold them into QEMU's
+userspace dirty page tracking, so later pre-copy iterations can resend pages dirtied by the guest.
+
+The reaper thread drains rings and calls `KVM_RESET_DIRTY_RINGS`, which is a VM-level KVM ioctl
+that hands consumed ring entries back to KVM so it can reuse entries and re-arm tracking as needed.
+Ring draining also happens at migration-thread synchronization points. If rings fill before
+userspace resets them, `KVM_RUN` can return with exit reason `KVM_EXIT_DIRTY_RING_FULL`, and vCPU
+threads force reap/reset progress. For KVM API details, see
+[KVM Dirty Page Tracking](./kvm-dirty-page-tracking.md).
 
 ### Multifd Sender and Receiver Threads
 
