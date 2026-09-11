@@ -7,7 +7,11 @@ Author: Artem Bityutskiy <dedekid1@gmail.com>
 
 This repository contains my study notes and articles.
 
-## Articles
+# Articles
+
+### TDX
+
+- 2026-06-03: [TDX Hardware Layers](2026/tdx-hw-layers.md)
 
 ### Virtualization
 
