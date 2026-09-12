@@ -9,7 +9,7 @@ This repository contains my study notes and articles.
 
 # Articles
 
-### TDX
+### Intel TDX
 
 - 2026-06-03: [TDX Hardware Layers](2026/tdx-hw-layers.md)
 
