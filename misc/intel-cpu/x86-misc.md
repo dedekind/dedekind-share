@@ -16,11 +16,33 @@ architecture, intended for reference from my other documents.
 
 - [Intel CPU](#intel-cpu)
   - [Table of Contents](#table-of-contents)
+  - [GLA and GVA](#gla-and-gva)
   - [XSAVE and State Components](#xsave-and-state-components)
     - [XCR0 and IA32\_XSS](#xcr0-and-ia32_xss)
     - [Features and XSAVE Components](#features-and-xsave-components)
     - [State Component Enumeration](#state-component-enumeration)
     - [Valid XCR0 and IA32\_XSS Values](#valid-xcr0-and-ia32_xss-values)
+
+## GLA and GVA
+
+**GLA** (Guest Linear Address) is the Intel term. The SDM uses it consistently, for example in
+VMCS field names.
+
+**GVA** (Guest Virtual Address) is the generic term used by other architectures and operating system
+documentation.
+
+In Intel terminology the x86 address translation chain is logical address, then linear address
+after segmentation, then physical address after paging.
+
+```text
+logical address           linear address          physical address
+(selector:offset) ------> (GLA or GVA) ---------> (GPA in a guest)
+                 segment                 paging
+                  base
+```
+
+With flat segmentation, which modern operating systems such as Linux use, the segment base is 0,
+so GLA and GVA are the same address.
 
 ## XSAVE and State Components
 
@@ -84,19 +106,18 @@ governed by both `XCR0` and `IA32_XSS`.
 
 ### Features and XSAVE Components
 
-As discussed earlier, state components are associated with CPU features. The SDM calls features
-with associated state components **XSAVE-supported features**. Normally, whether software may use
-such a feature is independent of its state component save/restore configuration. For some features,
-however, `XCR0` also controls whether software may use the feature.
+State components are associated with CPU features. The SDM calls features with associated state
+components **XSAVE-supported features**.
 
-- **XSAVE-enabled features** require their components to be enabled in `XCR0` before software may
-  use the feature. Otherwise, instructions using the feature cause the invalid-opcode exception
-  (`#UD`). AVX, AVX-512, and AMX are the examples of XSAVE-enabled features. For these features,
-  enabling the state components in `XCR0` also enables use of the feature.
-- **XSAVE-supported features** have state components, but `XCR0` and `IA32_XSS` control only state
-  save and restore. Software may use the feature even when its state component is disabled in `XCR0`
-  or `IA32_XSS`, but the XSAVE family instructions will not save or restore that component.
-  Examples include x87, SSE, PKRU, PT, CET, UINTR, LBR, and HWP.
+Some XSAVE-supported features are also **XSAVE-enabled features**. For these features, software may
+use the feature only when its state components are enabled in `XCR0`. Otherwise, instructions using
+the feature cause the invalid-opcode exception (`#UD`). AVX, AVX-512, and AMX are examples of
+XSAVE-enabled features.
+
+Other XSAVE-supported features are not XSAVE-enabled. For them, `XCR0` and `IA32_XSS` control only
+state save and restore. Software may use the feature even when its state component is disabled in
+`XCR0` or `IA32_XSS`, but the XSAVE family instructions will not save or restore that component.
+Examples include x87, SSE, PKRU, PT, CET, UINTR, LBR, and HWP.
 
 ### State Component Enumeration
 
