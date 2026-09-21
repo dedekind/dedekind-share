@@ -11,6 +11,7 @@ This repository contains my study notes and articles.
 
 ### Intel TDX
 
+- 2026-09-10: [TDX CPUID Virtualization](2026/tdx-cpuid-virtualization.md)
 - 2026-06-03: [TDX Hardware Layers](2026/tdx-hw-layers.md)
 
 ### Virtualization
