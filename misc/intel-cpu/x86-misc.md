@@ -12,6 +12,8 @@ not be treated as such. For full and authoritative information, refer to the Int
 This is not a standalone article. It is a collection of notes and explanations about Intel CPU
 architecture, intended for reference from my other documents.
 
+---
+
 ## Table of Contents
 
 - [Intel CPU](#intel-cpu)
@@ -22,6 +24,8 @@ architecture, intended for reference from my other documents.
     - [Features and XSAVE Components](#features-and-xsave-components)
     - [State Component Enumeration](#state-component-enumeration)
     - [Valid XCR0 and IA32\_XSS Values](#valid-xcr0-and-ia32_xss-values)
+
+---
 
 ## GLA and GVA
 
@@ -43,6 +47,8 @@ logical address           linear address          physical address
 
 With flat segmentation, which modern operating systems such as Linux use, the segment base is 0,
 so GLA and GVA are the same address.
+
+---
 
 ## XSAVE and State Components
 
