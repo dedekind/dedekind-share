@@ -649,24 +649,25 @@ The controlled features include `CORE_CAPABILITIES`, `MCA`, `MTRR`, `PCONFIG`, `
 
 ## TDX_FEATURES0
 
-`TDX_FEATURES0` is a 64-bit global metadata field that enumerates what the running TDX module
-supports. The TDX module sets it at initialization time. It depends on platform capabilities
-and the capabilities of this specific TDX module version.
+`TDX_FEATURES0` is a 64-bit global metadata field that reports platform capabilities and features
+supported by the running TDX module. The TDX module sets it at initialization time.
 
-When a `TDX_FEATURES0` bit is 1, it permits enabling the corresponding feature. Here are some
-examples of the bits, out of the full set.
-
-| Bit | Name                       | Permits                                                  |
+| Bit | Name                       | When Set                                                 |
 |-----|----------------------------|----------------------------------------------------------|
-| 0   | `TD_MIGRATION`             | Using TD migration seamcalls and tdcalls.                |
-| 12  | `HW_SEALING`               | Setting `TD_CTLS.ENABLE_HW_KEYS`.                        |
-| 16  | `PENDING_EPT_VIOLATION_V2` | Setting `TD_CTLS.PENDING_VE_DISABLE`.                    |
-| 17  | `FMS_CONFIG`               | Configuring `CPUID(0x1).EAX` for migratable TDs.         |
-| 18  | `NO_RBP_MOD`               | Setting `CONFIG_FLAGS.NO_RBP_MOD`.                       |
-| 20  | `TOPOLOGY_ENUM`            | Setting `TD_CTLS.ENUM_TOPOLOGY`.                         |
-| 27  | `MAXPA_VIRT`               | Setting `CONFIG_FLAGS.MAXPA_VIRT`.                       |
-| 29  | `CPUID2_VIRT`              | Setting `TD_CTLS.VIRT_CPUID2`.                           |
-| 30  | `VE_REDUCTION`             | Setting `TD_CTLS.REDUCE_VE` and `FEATURE_PARAVIRT_CTRL`. |
+| 0   | `TD_MIGRATION`             | Permits TD migration seamcalls and tdcalls.              |
+| 12  | `HW_SEALING`               | Permits setting `TD_CTLS.ENABLE_HW_KEYS`.                |
+| 14  | `ACT`                      | ACT platform.                                            |
+| 16  | `PENDING_EPT_VIOLATION_V2` | Permits setting `TD_CTLS.PENDING_VE_DISABLE`.            |
+| 17  | `FMS_CONFIG`               | Permits configuring `CPUID(0x1).EAX` for migratable TDs. |
+| 18  | `NO_RBP_MOD`               | Permits setting `CONFIG_FLAGS.NO_RBP_MOD`.               |
+| 20  | `TOPOLOGY_ENUM`            | Permits setting `TD_CTLS.ENUM_TOPOLOGY`.                 |
+| 27  | `MAXPA_VIRT`               | Permits setting `CONFIG_FLAGS.MAXPA_VIRT`.               |
+| 29  | `CPUID2_VIRT`              | Permits setting `TD_CTLS.VIRT_CPUID2`.                   |
+| 30  | `VE_REDUCTION`             | Permits setting `TD_CTLS.REDUCE_VE` and `FEATURE_PARAVIRT_CTRL`. |
+
+For the `ACT` bit, 0 means a non-ACT platform and 1 means an ACT platform. See
+[ACT vs Non-ACT Mechanisms](../../2026/tdx-hw-layers.md#act-vs-non-act-mechanisms) for more
+information.
 
 `TDX_FEATURES0` can be read by VMM using the `TDH.SYS.RD` seamcall, and by TD using the `TDG.SYS.RD`
 seamcall. But it cannot be modified by either the VMM or the TD.

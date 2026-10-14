@@ -14,9 +14,9 @@ such. For authoritative information, refer to the Intel TDX white paper and offi
 - **TDX Connect**: how memory protection works with TDX Connect (direct device assignment to a TD).
 - **MMU and SEPT walk mechanics**: for example, how the MMU handles private vs. shared GPA and
   the two-EPT hierarchy.
-- **ACT mechanism**: client platforms use the Access Control Table (ACT) mechanism, which is not
-  covered by this document. This document focuses on non-ACT mechanisms used on Intel server
-  platforms.
+- **ACT mechanism**: the [ACT vs Non-ACT overview](#act-vs-non-act-mechanisms) introduces the
+  difference, but the detailed ACT mechanism is not covered. The hardware walkthrough focuses on
+  non-ACT Intel server platforms.
 
 ---
 
@@ -80,15 +80,26 @@ concepts. They will be discussed in more detail later.
 
 ### ACT vs Non-ACT Mechanisms
 
-Server platforms use ECC (Error-Correcting Code) to detect and correct memory errors, and DRAM
-is provisioned with extra per-cache-line bits for ECC. TDX on server platforms leverages this
-extra room for storing the TD Owner bit and, optionally, the MAC.
+TDX hardware uses a TD Owner bit to distinguish TD private memory from shared memory. The bit is
+not directly visible to the TD or the VMM. ACT and non-ACT platforms differ in where the hardware
+stores the bit and how it updates it.
 
-Client platforms typically use non-ECC memory, so there are no extra per-cache-line bits available.
-TDX has to use a separate, per-memory-controller table called the Access Control Table (ACT) to
-store integrity tags.
+On **non-ACT platforms**, the TD Owner bit uses one bit of the per-cache-line ECC (Error-Correcting
+Code) area in DRAM. The memory controller sets or clears the bit on writes according to whether
+the write uses a private or shared HKID (Host Key ID). A per-cache-line MAC (Message Authentication
+Code) may also use bits from the ECC area. Server platforms use this mechanism.
 
-This document focuses on Non-ACT platforms.
+On **ACT platforms**, the TD Owner bits are stored in a separate Access Control Table (ACT), not
+in the per-cache-line ECC area. Each bit covers a 4KiB physical page, not a cache line. The ACT
+resides in the SEAM range, with a copy for each memory controller. The TDX module updates the bits
+when pages are converted between shared and private, and the memory controllers check them on
+memory accesses. ACT does not use a per-cache-line MAC. This makes ACT suitable for client
+platforms with non-ECC memory.
+
+ACT use is enumerated with the `ACT` bit of
+[TDX_FEATURES0](../misc/intel-cpu/tdx-structs.md#tdx_features0).
+
+The rest of this document describes non-ACT Intel server platforms.
 
 ### Li vs Ci Modes
 
