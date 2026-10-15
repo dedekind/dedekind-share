@@ -256,7 +256,7 @@ or not comes down to bit 63 alone, and that bit is owned differently for the two
   to the VMM with `TDG.VP.VMCALL`.
 - **Private memory**: The TDX module owns the Secure EPT and always sets bit 63 to 1, so the CPU
   never raises a `#VE`. The EPT violation becomes a [VM exit](#vm-exit-and-td-exit) into the TDX
-  module, which reads the SEPT entry and decides how to handle it, depending on the PTE state.
+  module, which reads the SEPT entry and decides how to handle it, depending on its state.
   Unlike the shared memory case, the CPU itself never injects the `#VE` here, only the module does,
   emulating the architectural mechanism.
   - One possibility is to inject a `#VE`. Today, this happens when the page is in the `PENDING` or

@@ -18,7 +18,15 @@ architecture, intended for reference from my other documents.
 
 - [Intel CPU](#intel-cpu)
   - [Table of Contents](#table-of-contents)
+  - [Linear and Virtual Addresses](#linear-and-virtual-addresses)
   - [GLA and GVA](#gla-and-gva)
+  - [Memory Types](#memory-types)
+  - [Memory Cache Control](#memory-cache-control)
+    - [MTRRs](#mtrrs)
+    - [PAT](#pat)
+    - [Non-VM Access](#non-vm-access)
+    - [EPT Memory Type](#ept-memory-type)
+    - [VM Accesses](#vm-accesses)
   - [XSAVE and State Components](#xsave-and-state-components)
     - [XCR0 and IA32\_XSS](#xcr0-and-ia32_xss)
     - [Features and XSAVE Components](#features-and-xsave-components)
@@ -27,26 +35,224 @@ architecture, intended for reference from my other documents.
 
 ---
 
-## GLA and GVA
-
-**GLA** (Guest Linear Address) is the Intel term. The SDM uses it consistently, for example in
-VMCS field names.
-
-**GVA** (Guest Virtual Address) is the generic term used by other architectures and operating system
-documentation.
+## Linear and Virtual Addresses
 
 In Intel terminology the x86 address translation chain is logical address, then linear address
-after segmentation, then physical address after paging.
+after segmentation, then physical address after paging. Virtual address is a generic term for the
+address translated by paging.
 
 ```text
 logical address           linear address          physical address
-(selector:offset) ------> (GLA or GVA) ---------> (GPA in a guest)
+(selector:offset) ------> (virtual address) ------> (physical address)
                  segment                 paging
                   base
 ```
 
 With flat segmentation, which modern operating systems such as Linux use, the segment base is 0,
-so GLA and GVA are the same address.
+so linear and virtual addresses refer to the same address.
+
+## GLA and GVA
+
+**GLA** (Guest Linear Address) is the Intel term for a guest [linear
+address](#linear-and-virtual-addresses). The SDM uses it, for example, in VMCS field names.
+
+**GVA** (Guest Virtual Address) is the generic term used by other architectures and operating system
+documentation. With flat segmentation, GLA and GVA refer to the same address. Paging translates it
+to a **GPA** (Guest Physical Address).
+
+---
+
+## Memory Types
+
+The Intel SDM describes each memory type by its caching behavior, speculative reads, and ordering
+model.
+
+- **Caching behavior**: whether accesses use the CPU caches and whether writes use write-back
+  caching.
+- **Speculative loads**: whether the CPU may start a load before knowing if its result will be
+  needed.
+- **Ordering model**: which pairs of loads and stores are guaranteed to remain in instruction order.
+  It has three possible values:
+  - **Strong ordering**:
+    - Load vs load: loads are observed in instruction order.
+    - Store vs store: stores become visible in instruction order.
+    - Load vs store: loads are observed and stores become visible in instruction order, regardless
+      of whether the address is the same or different.
+  - **Speculative processor ordering**:
+    - Load vs load: loads are observed in instruction order.
+    - Store vs store: stores become visible in instruction order (but there are exceptions, see
+      below).
+    - Load vs store:
+      - Load followed by store: the store never becomes visible before the load is observed.
+      - Store followed by load, same address: the load always returns the value written by the
+        store.
+      - Store followed by load, different address: the load may be observed before the store
+        becomes visible.
+  - **Weak ordering**:
+    - Load vs load: no order guarantee.
+    - Store vs store: stores may be delayed, combined, and become visible out of order.
+    - Load vs store:
+      - Load followed by store: no order guarantee.
+      - Store followed by load, same address: the load always returns the value written by the
+        store.
+      - Store followed by load, different address: no order guarantee.
+
+The Intel SDM defines the following memory types:
+
+| Type | Name            | Cacheable  | Write-back | Spcl loads | Ordering model                 |
+|------|-----------------|------------|------------|------------|--------------------------------|
+| UC   | Uncacheable     | No         | No         | No         | Strong ordering                |
+| WC   | Write combining | No         | No         | Yes        | Weak ordering                  |
+| WP   | Write protected | Reads only | No         | Yes        | Speculative processor ordering |
+| WT   | Write through   | Yes        | No         | Yes        | Speculative processor ordering |
+| WB   | Write back      | Yes        | Yes        | Yes        | Speculative processor ordering |
+
+**Linux examples**:
+
+- The `intel-lpss` driver uses UC memory type (`ioremap_uc()`) for its private configuration
+  registers.
+- The `i915` graphics driver uses WC memory type (`ioremap_wc()`) for mapping some of the GPU
+  memory.
+- Regular kernel memory (e.g., allocated with `kmalloc()`) uses WB memory type.
+
+**Note 1**: Ordinary stores, often called temporal stores, do not carry a non-temporal hint. For
+memory types that cache writes, their data may be kept in the CPU caches. Non-temporal move
+instructions are intended for data unlikely to be reused soon and avoid placing it in the caches.
+On P6 and newer Intel processors, writes to write-back cacheable memory are not reordered with
+other writes, except for streaming stores using non-temporal move instructions and string
+operations.
+
+**Note 2**: The name "Speculative processor ordering" can be misleading. It describes the ordering
+model, not whether loads may be speculative. WC permits speculative loads but uses weak ordering.
+
+**Note 3**: WC stores use write-combining buffers, separate from the L1, L2, and L3 caches and the
+store buffer. These buffers allow stores to be combined. The SDM does not guarantee ordering between
+successive WC buffer evictions or between partial writes.
+
+**Note 4**: The SDM also defines UC- as a memory type, but I think of it as resolving to either UC
+or WC, depending on the MTRR/PAT combination. See [Memory Cache Control](#memory-cache-control) for
+more information.
+
+## Memory Cache Control
+
+There are 3 mechanisms that control what [memory type](#memory-types) applies to a given memory
+access.
+
+- **MTRRs**: per physical address range control.
+- **PAT**: per [linear address](#linear-and-virtual-addresses) control.
+- **EPT memory type**: per [GPA](#gla-and-gva) control, used only for VMs.
+
+### MTRRs
+
+The **MTRRs** (Memory Type Range Registers) are MSRs that assign memory types to physical address
+ranges, independently of page table mappings. Firmware normally configures them to distinguish
+RAM from ROM and memory-mapped I/O.
+
+- **Fixed-range MTRRs**: 11 registers assign memory types to predefined subranges in the first
+  1MiB of physical memory. For example, `IA32_MTRR_FIX16K_80000` configures memory types for the
+  range 0x80000-0x9FFFF. `IA32_MTRRCAP.FIX` indicates whether the CPU supports them.
+- **Variable-range MTRRs**: specify memory types for configurable physical address ranges. Each
+  range uses a pair of registers. `IA32_MTRR_PHYSBASEn` specifies its base address and memory type,
+  and `IA32_MTRR_PHYSMASKn` contains the mask used to determine the range. The number of supported
+  ranges varies by CPU and is reported by the `VCNT` field of `IA32_MTRRCAP`. For example, on my
+  Emerald Rapids Xeon processor there are 10 variable-range MTRRs.
+- **Default type**: `IA32_MTRR_DEF_TYPE` specifies the memory type for physical address ranges not
+  covered by a fixed-range or variable-range MTRR. Its `E` bit enables MTRRs. When `E` is set, its
+  `FE` bit enables fixed-range MTRRs.
+
+### PAT
+
+The **PAT** (Page Attribute Table) lets the OS select a memory type for each page mapping through
+its page table entries. Unlike MTRRs, which assign memory types to physical address ranges, PAT
+assigns them per linear address mapping.
+
+The `IA32_PAT` MSR (0x277) contains eight 8-bit fields (`PA0` - `PA7`). Each field encodes one
+memory type.
+
+Page table entries include the `PAT`, `PCD`, and `PWT` bits. `PCD` means page-level cache disable,
+and `PWT` means page-level write-through. `PCD` and `PWT` are bits 4 and 3, respectively. `PAT` is
+bit 7 in a 4KiB page table entry and bit 12 in an entry for a larger page.
+
+Together, `PAT`, `PCD`, and `PWT` form a 3-bit index that selects one of the eight `IA32_PAT`
+fields. `PAT` is the high bit, `PCD` the middle bit, and `PWT` the low bit.
+
+### Non-VM Access
+
+This subsection covers how MTRR and PAT combine for non-VM memory accesses. VM access uses a
+different mechanism and is covered later in this section.
+
+For non-VM accesses, the CPU combines the MTRR type for the physical address with the PAT type
+selected by the page table entry. The combination depends on two cache-control bits in `CR0`:
+
+- `CD` (Cache Disable, bit 30) controls caching.
+- `NW` (Not Write-through, bit 29) controls the cache write policy.
+
+We consider only what the SDM calls normal caching, with both bits clear (`CR0.CD = 0` and
+`CR0.NW = 0`). In this configuration, write-back is enabled, subject to the MTRR and PAT types.
+
+The combination rules are not entirely straightforward, but it helps to think about them using the
+same two ideas that define each [memory type](#memory-types) above: cacheability and the ordering
+model.
+
+- Non-cacheable:
+  - **UC**: no cache, no write-combining buffers, strong ordering.
+  - **WC**: no cache, loads and stores go through write-combining buffers, weak ordering.
+- Cacheable:
+  - **WP**: cache reads but never cache writes, speculative processor ordering.
+  - **WT**: write through to memory on every store, speculative processor ordering.
+  - **WB**: write back normally, speculative processor ordering.
+
+The order within each group is not random either. It roughly ranks how much caching is actually
+involved, from UC, which is sort of nothing, to WB, which is all of it. This is more of an intuition
+than a strict rule, so take it with a grain of salt.
+
+In general, PAT takes precedence over MTRR. The first set of exceptions arises when PAT asks for
+caching that MTRR does not support. Here they are, with my intuition behind them.
+
+- PAT UC and PAT WC do not need MTRR to support any caching, so they always win outright.
+- PAT WP and PAT WT do use the cache, but MTRR UC and MTRR WC do not support that, so the effective
+  type is forced to UC. Intuition: WC (weak ordering) lets stores be delayed and combined, while WP
+  and WT do not. So UC (strong ordering) is the safer choice.
+
+PAT WB is a separate exception. It never takes precedence, and for any MTRR type the effective type
+is the MTRR type. I cannot offer a simple intuition for this case. For me it is just an Intel CPU
+quirk.
+
+PAT UC- is yet another exception. It resolves to either UC or WC depending on the MTRR type, but
+there is no simple intuition I can offer for it. The SDM notes that some of these combinations were
+left undefined in the past. So I just consider it another Intel CPU quirk.
+
+Here is the complete combination table from Intel SDM.
+
+| MTRR type / PAT type  | UC | UC- | WC | WP | WT | WB |
+|-----------------------|----|-----|----|----|----|----|
+| UC                    | UC | UC  | WC | UC | UC | UC |
+| WC                    | UC | WC  | WC | UC | UC | WC |
+| WP                    | UC | WC  | WC | WP | WT | WP |
+| WT                    | UC | UC  | WC | WP | WT | WT |
+| WB                    | UC | UC  | WC | WP | WT | WB |
+
+### EPT Memory Type
+
+For VM accesses, EPT translates a GPA to a host physical address. The EPT memory type is encoded in
+bits 5:3 of the final EPT entry used for the translation. This is separate from the memory type
+field in the EPT pointer (EPTP), which controls accesses to the EPT paging structures.
+
+### VM Accesses
+
+For a VM, the effective memory type is determined by only two inputs: the VM PAT type and the EPT
+memory type. Two translation steps are involved.
+
+- GVA is translated to GPA via the VM page tables. This step selects the VM PAT type from the VM
+  `IA32_PAT`, without combining it with any MTRR type.
+- GPA is translated to HPA via EPT. This step determines the effective memory type from the VM PAT
+  type and the EPT memory type, as described below. The host MTRRs have no effect here either.
+
+Bit 6 of the final EPT entry is called `Ignore PAT memory type`:
+
+- If the bit is 1, the CPU uses the EPT type alone, ignoring the VM PAT type entirely.
+- If the bit is 0, the CPU combines the EPT and VM PAT types using the same
+  matrix as for [non-VM accesses](#non-vm-access), but instead of MTRR type, the EPT type is used.
 
 ---
 

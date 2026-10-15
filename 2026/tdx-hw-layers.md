@@ -457,7 +457,7 @@ VMX root mode (MAXPHYADDR = 51):
 
 Bit: 51 50     46 45                              0
      +--+--------+---------------------------------+
-     |R | Shared |     Addressable from PTEs       |
+     |R | Shared |      Physical address bits      |
      |  | HKID   |       MAXPHYADDR = 51           |
      +--+--------+---------------------------------+
       ^
