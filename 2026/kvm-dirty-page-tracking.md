@@ -81,8 +81,9 @@ document assumes EPT is enabled.
 
 ### EPT Background
 
-EPT (Extended Page Tables) translates guest physical addresses (GPA) to host physical addresses
-(HPA). EPT structure is similar to regular page tables and typically has 4 levels:
+EPT (Extended Page Tables) translates [GPA](../misc/intel-cpu/x86-misc.md#guest-addresses) to
+[HPA](../misc/intel-cpu/x86-misc.md#host-addresses). EPT structure is similar to regular page tables
+and typically has 4 levels:
 
 - PML4 (Page Map Level 4)
 - PDPT (Page Directory Pointer Table)

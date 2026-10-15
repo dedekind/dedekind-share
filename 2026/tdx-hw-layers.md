@@ -195,8 +195,8 @@ from devices (DMA path). Its security component, the MK-TME engine, performs enc
 integrity checking, and TD Owner bit enforcement on every DRAM access.
 
 All requests to the memory controller are processed at cache-line (64-byte) granularity. Each
-cache line has its own host physical address (HPA) carrying an HKID in its upper bits. The HKID
-selects which encryption key the MK-TME engine uses.
+cache line has its own [HPA](../misc/intel-cpu/x86-misc.md#host-addresses) carrying an HKID in
+its upper bits. The HKID selects which encryption key the MK-TME engine uses.
 
 ### HKID Classes
 
@@ -316,7 +316,7 @@ snoop resolves it without a DRAM access. If the line is not cached, the request 
 Two mechanisms prevent DMA from accessing TD-private memory:
 
 - **Private HKID abort.** DMA with a private HKID is aborted. Devices are restricted to shared
-  HKIDs. **Note**: This is different for devices assigned to the TD with TDX Connect, but this is
+  HKIDs. Note, this is different for devices assigned to the TD with TDX Connect, but this is
   out of scope of this document.
 - **TD Owner bit check.** If a device uses a shared HKID to read a TD-private cache line, the
   TD Owner bit mismatch triggers a fixed pattern response (with poison in Ci mode,
@@ -446,9 +446,10 @@ generates a `#PF`.
 
 ### VMX Root Mode
 
-In VMX root mode, the core uses standard host paging, which translates host virtual addresses (HVA)
-to host physical addresses (HPA) via CR3. No EPT is involved. All memory accesses carry a shared
-HKID. Private HKIDs are inaccessible because `MAXPHYADDR` is reduced in VMX root mode.
+In VMX root mode, the core uses standard host paging, which translates
+[HVA](../misc/intel-cpu/x86-misc.md#host-addresses) to HPA via CR3. No EPT is involved. All memory
+accesses carry a shared HKID. Private HKIDs are inaccessible because `MAXPHYADDR` is reduced in VMX
+root mode.
 
 On the Emerald Rapids system, ***p = 1***, so `MAXPHYADDR` = 51 outside SEAM and bit 51 is reserved:
 
@@ -457,7 +458,7 @@ VMX root mode (MAXPHYADDR = 51):
 
 Bit: 51 50     46 45                              0
      +--+--------+---------------------------------+
-     |R | Shared |     Addressable from PTEs       |
+     |R | Shared |      Physical address bits      |
      |  | HKID   |       MAXPHYADDR = 51           |
      +--+--------+---------------------------------+
       ^
@@ -479,8 +480,8 @@ Unlike VMX root mode, `MAXPHYADDR` is not reduced in SEAM root mode. The core ca
 physical address range (52 bits on the Emerald Rapids system), including the private HKID bits,
 which allows the TDX module to perform operations such as:
 
-- Build the Secure EPT (SEPT) that maps guest-physical addresses (GPA) to host-physical addresses
-  (HPA) for each TD.
+- Build the Secure EPT (SEPT) that maps [GPA](../misc/intel-cpu/x86-misc.md#guest-addresses) to HPA
+  for each TD.
 - Write the HKID of the TD into the Virtual Machine Control Structure (VMCS) so the hardware knows
   which key to use when entering SEAM non-root mode.
 
@@ -501,8 +502,8 @@ The TDX module physical pages fall into two categories:
 ### SEAM Non-Root Mode
 
 In SEAM non-root mode, the core executes TD guest code. Address translation uses two stages: guest
-paging (GVA to GPA via CR3) followed by EPT (GPA to HPA). The GPA contains a shared bit that
-selects between two types of memory:
+paging ([GVA](../misc/intel-cpu/x86-misc.md#guest-addresses) to GPA via CR3) followed by EPT
+(GPA to HPA). The GPA contains a shared bit that selects between two types of memory:
 
 - **Private memory**: uses the SEPT, managed exclusively by the TDX module and not accessible to the
   VMM or TD.

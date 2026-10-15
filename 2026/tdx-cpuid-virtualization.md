@@ -118,8 +118,10 @@ The following are some of the CPUID leaves:
 - `0x40000000` to `0x4FFFFFFF`, **Hypervisor Range**. Not architectural. By convention hypervisors
   use this range to identify themselves and to enumerate their paravirtual interfaces.
 - `0x80000000`, **Extended CPUID Information**. Highest supported extended leaf.
-- `0x80000008`, **Address Sizes**. The physical and linear address widths. Depending on the TD
-  configuration, TDX may also use this leaf to report the GPA width to the TD.
+- `0x80000008`, **Address Sizes**. The physical and
+  [linear address](../misc/intel-cpu/x86-misc.md#linear-and-virtual-addresses) widths. Depending on
+  the TD configuration, TDX may also use this leaf to report the
+  [GPA](../misc/intel-cpu/x86-misc.md#guest-addresses) width to the TD.
 
 ---
 

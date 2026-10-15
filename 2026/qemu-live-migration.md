@@ -333,7 +333,9 @@ For example, a MemoryRegion can represent:
 - An MMIO window.
 - An alias, which is an alternate mapping of another MemoryRegion.
 
-MemoryRegion objects do not store a fixed GPA or HVA for the region. Instead, they store metadata
+MemoryRegion objects do not store a fixed
+[GPA](../misc/intel-cpu/x86-misc.md#guest-addresses) or
+[HVA](../misc/intel-cpu/x86-misc.md#host-addresses) for the region. Instead, they store metadata
 that QEMU uses to build the GPA layout and route accesses either to host-backed memory or to device
 MMIO handlers.
 
