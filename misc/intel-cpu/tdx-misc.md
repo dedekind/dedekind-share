@@ -41,6 +41,19 @@ concepts, intended for reference from my other documents.
     - [TDX Connect-Specific States](#tdx-connect-specific-states)
     - [Non-Leaf Entry States](#non-leaf-entry-states)
     - [SEPT State Encoding](#sept-state-encoding)
+  - [TLB Tracking](#tlb-tracking)
+    - [The TLB Tracking Protocol](#the-tlb-tracking-protocol)
+    - [Why the VMM Must Drive the Flush](#why-the-vmm-must-drive-the-flush)
+    - [Which CPUs Need the IPI](#which-cpus-need-the-ipi)
+    - [Enforcing the Protocol](#enforcing-the-protocol)
+    - [Example: Reclaiming a Private Page](#example-reclaiming-a-private-page)
+  - [Page State Transitions](#page-state-transitions)
+    - [Private to Shared](#private-to-shared)
+    - [Shared to Private](#shared-to-private)
+    - [Pending to Private](#pending-to-private)
+    - [Private to Pending](#private-to-pending)
+    - [Private or Pending to Unmapped](#private-or-pending-to-unmapped)
+    - [Shared to Unmapped](#shared-to-unmapped)
 
 ---
 
@@ -314,6 +327,8 @@ There are three main sources.
 Additionally, the TDX module can use `#VE` to notify the TD about anomalous behavior, such as
 repeated EPT violations on the same instruction with no progress.
 
+---
+
 ## SEPT Page States
 
 This section describes L1 SEPT leaf and non-leaf entry states, which track private GPA pages. L2
@@ -380,14 +395,20 @@ violation [TD exit](#vm-exit-and-td-exit), and the VMM is expected to unblock th
 
 ### TDX Connect-Specific States
 
-Private MMIO pages are private pages assigned to a TDI. The following TDX Connect states are all
-leaf states and apply specifically to these pages.
+MMIO pages are pages of the MMIO space of a TDI, such as its device registers, that the VMM maps
+into the private GPA space of the TD with `TDH.MMIO.MAP`. The TD uses them to access the device via
+CPU loads and stores, for example to read device status or to write commands to the device. The TDX
+module tracks them in a separate MMIO metadata table (`MMIOMT`), not in the PAMT. The MMIOMT entry
+records the TDI that owns the page.
 
-- `MMIO_MAPPED`: the private MMIO page is accessible to the TD.
-- `MMIO_BLOCKED`: the VMM blocked the private MMIO page with `TDH.MMIO.BLOCK`, so the CPU can no
-  longer create new cached translations to it.
-- `MMIO_PENDING`: the private MMIO page is pending acceptance by the TD using
-  `TDG.TDI.MMIO.ACCEPT`.
+**Note**: TDI DMA accesses ordinary `MAPPED` private pages of the TD, not MMIO pages.
+
+The following TDX Connect states are leaf SEPT states and apply only to MMIO pages.
+
+- `MMIO_MAPPED`: the MMIO page is accessible to the TD.
+- `MMIO_BLOCKED`: the VMM blocked the MMIO page with `TDH.MMIO.BLOCK`, so the CPU can no longer
+  create new cached translations to it.
+- `MMIO_PENDING`: the MMIO page is pending acceptance by the TD using `TDG.TDI.MMIO.ACCEPT`.
 
 ### Non-Leaf Entry States
 
@@ -457,3 +478,228 @@ Comments on the table:
 
 **Note**: Bits 56:53 are `0000` in both states. The difference is in `IPAT` and the EPT memory type,
 which determine the effective memory type.
+
+---
+
+## TLB Tracking
+
+TLB tracking is a TDX module protocol that ensures there are no cached TLB entries for a given
+TD private GPA range.
+
+The problem TLB tracking solves is that when the TDX module changes a SEPT entry, a CPU that holds a
+cached translation of that entry does not see the change. The CPU keeps using the cached translation
+instead of walking the SEPT and reading the updated entry. So whenever a SEPT entry change must
+become visible to every vCPU, the VMM performs TLB tracking.
+
+The protocol works by flushing cached translations. Ideally it would flush only the affected GPAs,
+but on Intel CPUs the `INVEPT` instruction flushes all TLB entries of a TD on one CPU at a time. So
+the result of the TLB tracking protocol is that all TLB entries of the TD are flushed on every CPU
+that could hold a cached translation for it.
+
+TLB tracking is required before some seamcalls, for example:
+
+- `TDH.MEM.PAGE.REMOVE` (reclaim a TD private page).
+- `TDH.MEM.SEPT.REMOVE` (reclaim a SEPT page).
+- The blocking variants of `TDH.MEM.PAGE.PROMOTE` (merge small pages into a larger page) and
+  `TDH.MEM.PAGE.DEMOTE` (split a large page into smaller pages).
+
+Without TLB tracking, a CPU could keep using a stale translation after the mapping has been changed
+or removed, which would let the TD read or write memory it should no longer have access to.
+
+### The TLB Tracking Protocol
+
+The TLB tracking protocol has two steps:
+
+1. The VMM calls `TDH.MEM.TRACK` once, on any CPU.
+2. The VMM sends an IPI to each CPU that currently runs a vCPU of the TD, forcing a TD exit.
+
+Before a vCPU of the TD runs on a CPU again, the TDX module flushes the TLB of the TD on that CPU,
+preventing the vCPU from using a stale translation.
+
+### Why the VMM Must Drive the Flush
+
+Could the TDX module just flush the stale TLB entries itself, transparently, as part of the
+operation that needs the flush, instead of making the VMM run a separate protocol?
+
+No, because a seamcall runs only on the CPU the VMM invoked it from, not on every CPU where a stale
+translation might exist. Only the VMM can reach those other CPUs, by sending them an IPI, which is
+why the TLB tracking protocol exists as a distinct, VMM-visible step.
+
+### Which CPUs Need the IPI
+
+The TLB is per CPU, so a stale translation can sit on any CPU where a vCPU of the TD has run and
+whose TLB has not been flushed since. But step 2 of the protocol only needs to reach CPUs that
+currently run a vCPU of the TD, because the TDX module takes care of the other CPUs.
+
+The TDX module has an `ASSOC_LPID` field in [TDVPS](tdx-structs.md#tdvps), which records the CPU a
+vCPU is currently associated with, or a "no CPU" value if it is not associated with any CPU.
+Seamcalls that operate on a vCPU (such as `TDH.VP.ENTER`) associate a non-associated vCPU with the
+current CPU, and fail if the vCPU is associated with a different CPU.
+
+To move a vCPU to a new CPU, the VMM must first invoke `TDH.VP.FLUSH` on the old CPU. This flushes
+the TLB of the TD on the old CPU and resets `ASSOC_LPID` to the "no CPU" value.
+
+So a CPU that does not currently run a vCPU of the TD is in one of two cases.
+
+- **No vCPU of the TD is associated with it**. `TDH.VP.FLUSH` already flushed its TLB, so it holds
+  no translation for the TD.
+- **A vCPU of the TD is associated with it, but is not running**. The next `TDH.VP.ENTER` on this
+  CPU flushes the TLB of the TD, as described in [Enforcing the Protocol](#enforcing-the-protocol).
+
+### Enforcing the Protocol
+
+If the VMM skips or mis-sequences the protocol, for example by letting the dependent operation run
+before every vCPU has exited, a stale translation could let a CPU keep using an old mapping.
+So the TDX module does not just trust the VMM to have run the protocol correctly. It verifies this
+with the following fields.
+
+- **TD epoch** (`TD_EPOCH`): a counter in [TDCS](tdx-structs.md#tdcs) for the entire TD.
+  `TDH.MEM.TRACK` increments it.
+- **vCPU epoch** (`VCPU_EPOCH`): enforces the flush when a vCPU enters after `TDH.MEM.TRACK`. It
+  is a value in [TDVPS](tdx-structs.md#tdvps) that stores the `TD_EPOCH` value sampled at the most
+  recent `TDH.VP.ENTER` of the vCPU. During `TDH.VP.ENTER`, the TDX module compares the current
+  `TD_EPOCH` against `VCPU_EPOCH`.
+  - If they are equal, `TDH.MEM.TRACK` was not called since the vCPU last entered, and no flush is
+    needed.
+  - If `TD_EPOCH` is greater, `TDH.MEM.TRACK` was called since the vCPU last entered. The TDX module
+    flushes the TLB of the TD on the current CPU with the `INVEPT` instruction and updates
+    `VCPU_EPOCH`.
+  - Optimization: the flush is skipped if the vCPU was not associated with the current CPU before
+    this `TDH.VP.ENTER`, because the CPU then holds no translation for the TD.
+- **Running vCPU counters** (`REFCOUNT`): prove that every vCPU that was running at
+  `TDH.MEM.TRACK` time has exited, which is what the IPIs of step 2 achieve. `REFCOUNT` is two
+  counters in [TDCS](tdx-structs.md#tdcs), indexed by `TD_EPOCH % 2`.
+  - `TDH.VP.ENTER` increments `REFCOUNT[TD_EPOCH % 2]`.
+  - The [TD exit](#vm-exit-and-td-exit) decrements `REFCOUNT[VCPU_EPOCH % 2]`.
+  - `TDH.MEM.TRACK` increments `TD_EPOCH`, so new entries start using the other counter. The old
+    counter now belongs to the previous epoch, and it goes down to 0 as the vCPUs exit.
+  - `TDH.MEM.TRACK` fails with `TDX_PREVIOUS_TLB_EPOCH_BUSY` if the previous epoch counter is not
+    0, because the next epoch reuses that counter. This may be because the IPI is still in flight,
+    or because the VMM did not send it. Either way, from the TDX module point of view, the previous
+    round of the protocol has not completed.
+- **Block epoch** (`BEPOCH`): proves that `TDH.MEM.TRACK` ran after the page was blocked. It is a
+  field in the PAMT entry of the page.
+  - Blocking the page (for example with `TDH.MEM.RANGE.BLOCK`) copies the current `TD_EPOCH` value
+    into `BEPOCH`.
+  - A dependent seamcall, such as `TDH.MEM.PAGE.REMOVE`, fails with `TDX_EPT_ENTRY_STATE_INCORRECT`
+    if the page is not blocked.
+  - It also checks that TLB tracking for the page is complete. Tracking is complete in two cases,
+    otherwise the seamcall fails with `TDX_TLB_TRACKING_NOT_DONE`.
+    - `TD_EPOCH` equals `BEPOCH + 1`, and the `REFCOUNT` of epoch `BEPOCH` is 0. This means
+      `TDH.MEM.TRACK` ran after the page was blocked, and every vCPU that entered before that has
+      since had a TD exit.
+    - `TD_EPOCH` is greater than `BEPOCH + 1`. This means `TDH.MEM.TRACK` ran at least twice, and
+      the second call could only succeed once the `REFCOUNT` of epoch `BEPOCH` dropped to 0.
+
+### Example: Reclaiming a Private Page
+
+The TD can ask the VMM to reclaim a private page, for example as part of the
+[Private to Shared](#private-to-shared) page transition. Once reclaimed, the VMM can reuse the
+physical page for other purposes.
+
+The TDX module provides the `TDH.MEM.PAGE.REMOVE` seamcall, which moves the SEPT entry to `FREE`
+and reclaims the physical page. If it did so directly on a `MAPPED` entry, a CPU might still hold a
+cached translation to the old `MAPPED` entry, and could keep reading or writing the physical page
+through that stale translation after the VMM has reused it elsewhere. This would let the TD access
+memory it no longer owns.
+
+So while the TD may be running, `TDH.MEM.PAGE.REMOVE` accepts only a blocked page with completed TLB
+tracking, and the VMM goes through the following steps:
+
+1. The VMM calls `TDH.MEM.RANGE.BLOCK` on the page's GPA, which marks the SEPT entry as `BLOCKED`.
+   The entry still exists, but a CPU that walks the SEPT for this GPA now gets an EPT violation
+   instead of a valid translation, so it cannot create a new cached translation to the page.
+2. The VMM runs the TLB tracking protocol, which flushes the cached translations that already exist,
+   so the `BLOCKED` state becomes visible to every CPU.
+3. The VMM calls `TDH.MEM.PAGE.REMOVE`, which verifies that TLB tracking is complete, moves the SEPT
+   entry to `FREE`, and reclaims the physical page.
+
+In other words, the VMM first closes off new cached translations by marking the SEPT entry
+`BLOCKED`, then flushes the existing cached translations by running the TLB tracking protocol, and
+only then makes the final SEPT entry change to `FREE`.
+
+---
+
+## Page State Transitions
+
+This section describes transitions between private and shared mappings for a TD GPA. The `SHARED`
+bit selects the mapping: when clear, the GPA maps through the SEPT; when set, it maps through the
+Shared EPT. These are mapping types, not SEPT entry states such as `PENDING`, `MAPPED`, and `FREE`.
+Refer to [SEPT page states](#sept-page-states) for details.
+
+### Private to Shared
+
+1. The TD sets the `SHARED` bit of the GPA in its own page table entries that map the page. It then
+   has two options to make the VMM aware of the conversion (not required by TDX specifications):
+   - Call `TDG.VP.VMCALL<MapGPA>`, a GHCI-defined VMCALL sub-function that tells the VMM about the
+     conversion and lets it prepare the Shared EPT mapping in advance, avoiding an EPT violation on
+     the next access. This is the option the Linux kernel uses.
+   - Just access the GPA. Because the GPA now has the `SHARED` bit set, the CPU walks the Shared
+     EPT instead of the SEPT, and the Shared EPT has no mapping for this GPA yet, so this
+     causes an EPT violation TD exit.
+2. The VMM calls `TDH.MEM.RANGE.BLOCK` on the private GPA, so the CPU can no longer create new
+   cached translations to it.
+3. The VMM runs the [TLB tracking protocol](#the-tlb-tracking-protocol), which flushes the TLB
+   entries of the TD, so no CPU can still hold a cached translation for the private GPA.
+4. The VMM calls `TDH.MEM.PAGE.REMOVE` to clear the SEPT entry and reclaim the physical page.
+5. The VMM maps the GPA in the Shared EPT to a physical page (not required by TDX specifications).
+6. The TD can now access the GPA as a shared page, backed by VMM-managed shared memory.
+
+### Shared to Private
+
+1. The TD decides that it needs the shared GPA as private and notifies the VMM (not required by TDX
+   specifications, but since it is the TD that controls its GPAs, it must initiate the transition
+   and be ready to accept a private page).
+   - Linux kernel uses the GHCI-defined VMCALL sub-function `TDG.VP.VMCALL<MapGPA>` to notify the
+     VMM about the transition from shared to private for the GPA, the same sub-function used for
+     the "Private to Shared" direction, but with the `SHARED` bit of the GPA cleared instead of set.
+2. The VMM unmaps the GPA from the Shared EPT and can reclaim the physical page (not required by
+   TDX specifications).
+3. If required, the VMM adds SEPT pages with `TDH.MEM.SEPT.ADD` to build the SEPT mapping path to
+   the GPA, for example when the GPA falls into a region with no existing SEPT mapping.
+   - In Linux kernel, KVM maintains a copy of SEPT called the **mirror page table**. So Linux knows
+     in advance whether new SEPT pages need to be added.
+4. The VMM calls `TDH.MEM.PAGE.AUG` to map the GPA to a private page, and the corresponding SEPT
+   entry is set to the `PENDING` state.
+   - In Linux kernel terms, `PENDING` pages are called "unaccepted" pages.
+   - The HPA of the private page is an input argument of `TDH.MEM.PAGE.AUG`, so the VMM chooses
+     which physical page to donate.
+   - In Linux, KVM keeps track of private TD memory in a separate pool (`guest_memfd`), so the
+     physical page will not be the same one that was previously used for the shared GPA.
+5. The VMM re-enters the TD.
+6. The TD calls `TDG.MEM.PAGE.ACCEPT` for the GPA. The TDX module zeroes the page and marks the SEPT
+   entry as `MAPPED`, completing the transition from shared to private.
+
+### Pending to Private
+
+The TD can just call `TDG.MEM.PAGE.ACCEPT` to transition a page from `PENDING` to private
+(`MAPPED`). This is covered in step 6 of the [Shared to Private](#shared-to-private) transition.
+
+### Private to Pending
+
+The TD can just call `TDG.MEM.PAGE.RELEASE` to transition a private (`MAPPED`) page back to
+`PENDING`.
+
+**Note**: support for the `TDG.MEM.PAGE.RELEASE` tdcall is optional, enumerated by `PAGE_RELEASE` in
+[TDX_FEATURES0](tdx-structs.md#tdx_features0),
+and the VMM must enable it per TD at TD initialization time (`TDH.MNG.INIT`) via `PAGE_RELEASE` in
+[CONFIG_FLAGS](tdx-structs.md#config_flags).
+
+### Private or Pending to Unmapped
+
+The VMM removes a SEPT entry with `TDH.MEM.PAGE.REMOVE` for a leaf entry (moving it to `FREE`) or
+`TDH.MEM.SEPT.REMOVE` for a non-leaf one whose child entries are all `FREE`. Before that, it must
+block the range and run the [TLB tracking protocol](#the-tlb-tracking-protocol). Whether the VMM
+needs the TD to cooperate depends on whether a TDI is attached to the TD.
+
+- **No TDI attached**: the VMM can remove a `MAPPED` or `PENDING` entry at any time, without asking
+  the TD. This happens as part of [Private to Shared](#private-to-shared) (steps 2 to 4), and also
+  on its own, for example when the VMM reclaims memory the TD gave up with `TDG.MEM.PAGE.RELEASE`.
+- **TDX Connect with a TDI attached**: `TDH.MEM.RANGE.BLOCK` accepts only `PENDING` pages, so the
+  TD has to release a `MAPPED` page with `TDG.MEM.PAGE.RELEASE` before the VMM can remove it. This
+  prevents a page from going away while the TDI may still DMA to it, which would silently drop
+  data.
+
+### Shared to Unmapped
+
+The VMM can just unmap any shared GPA at any time. The VMM exclusively owns the Shared EPT.
