@@ -3,7 +3,7 @@
 - **Author**: Artem Bityutskiy
 - **Version**: 0.1
 - **Date**: 2026-07-13
-- **Last updated**: 2026-09-06
+- **Last updated**: 2026-10-16
 
 **Disclaimer**: This document reflects my current understanding of various Intel CPU concepts and
 mechanisms, but it may contain errors or omissions. It is not an official Intel document and should

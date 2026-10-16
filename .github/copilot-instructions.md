@@ -36,7 +36,7 @@
 - Always specify a language tag on fenced code blocks. Never use a bare ` ``` ` with no tag.
   Common tags: `python`, `c`, `bash`, `yaml`, `markdown`, `text`. Use `text` for plain output or
   command examples.
-- Do not split markdown links or backtick quotations across multiple lines. Keep them complete on
-  a single line to maintain readability and proper formatting.
+- Keep Markdown links and backtick quotations on one line. If a link would exceed the 100-character
+  line limit, put the complete link on its own line, even if that line exceeds the limit.
 - In pseudo-graphics (ASCII diagrams, trees, flow sketches), use ASCII-only symbols and avoid
   non-ASCII box-drawing or arrow characters for mobile compatibility.

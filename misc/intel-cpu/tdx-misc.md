@@ -3,7 +3,7 @@
 - **Author**: Artem Bityutskiy
 - **Version**: 0.1
 - **Date**: 2026-07-03
-- **Last updated**: 2026-09-06
+- **Last updated**: 2026-10-16
 
 **Disclaimer**: These notes reflect my current understanding of TDX module concepts and mechanisms
 and may contain errors or omissions. They are not an official Intel document. Refer to the
@@ -35,6 +35,12 @@ concepts, intended for reference from my other documents.
   - [#VE](#ve)
     - [Architectural #VE](#architectural-ve)
     - [TDX-Extended #VE](#tdx-extended-ve)
+  - [SEPT Page States](#sept-page-states)
+    - [Leaf Entry States](#leaf-entry-states)
+    - [Live Migration-Specific States](#live-migration-specific-states)
+    - [TDX Connect-Specific States](#tdx-connect-specific-states)
+    - [Non-Leaf Entry States](#non-leaf-entry-states)
+    - [SEPT State Encoding](#sept-state-encoding)
 
 ---
 
@@ -307,3 +313,147 @@ There are three main sources.
 
 Additionally, the TDX module can use `#VE` to notify the TD about anomalous behavior, such as
 repeated EPT violations on the same instruction with no progress.
+
+## SEPT Page States
+
+This section describes L1 SEPT leaf and non-leaf entry states, which track private GPA pages. L2
+SEPTs use different names and encodings.
+
+### Leaf Entry States
+
+- `FREE`: no page is associated with the GPA yet. This is the initial state of a leaf entry.
+- `MAPPED`: the page is accessible to the TD, for example because the TD accepted it, or because
+  the VMM added it at TD build time with `TDH.MEM.PAGE.ADD`.
+- `PENDING`: the VMM added a private page to the GPA with `TDH.MEM.PAGE.AUG`, but the TD has not
+  yet accepted it with `TDG.MEM.PAGE.ACCEPT`. The TD cannot access the page in this state.
+  Depending on TD configuration, an access either raises a `#VE(PENDING)` to the TD or causes a TD
+  exit to the VMM (see [Architectural #VE](#architectural-ve)). A `MAPPED` page also becomes
+  `PENDING` if the TD releases it with `TDG.MEM.PAGE.RELEASE`.
+- `BLOCKED`: the VMM blocked a `MAPPED` range with `TDH.MEM.RANGE.BLOCK`, so the CPU can no longer
+  create new cached translations to it. An access causes a [TD exit](#vm-exit-and-td-exit).
+- `PENDING_BLOCKED`: the VMM blocked a `PENDING` range with `TDH.MEM.RANGE.BLOCK`, so the CPU can
+  no longer create new cached translations to it. Unlike plain `PENDING`, an access always causes
+  a TD exit rather than a `#VE`.
+- `REMOVE_IN_PROGRESS`: the `TDH.MEM.PAGE.REMOVE` seamcall was interrupted while reclaiming the
+  page. This can only happen on
+  [ACT platforms](../../2026/tdx-hw-layers.md#act-vs-non-act-mechanisms).
+
+### Live Migration-Specific States
+
+The following states track page export in the source TD. They belong to non-blocking export, which
+uses the EPT Dirty bit to detect modified pages.
+
+- `EXPORTED`: the page was exported and not modified since.
+- `EXPORTED_MODIFIED`: the page was exported, but its content or attributes changed since. The
+  `TDH.EXPORT.MEM` seamcall re-exports it and moves it back to the `EXPORTED` state.
+- `PENDING_EXPORTED` and `PENDING_EXPORTED_MODIFIED`: same as above, but the page is `PENDING`.
+  For example, if the TD releases an exported page with `TDG.MEM.PAGE.RELEASE`, the page becomes
+  `PENDING_EXPORTED_MODIFIED`.
+- `EXPORTED_BLOCKED`, `PENDING_EXPORTED_BLOCKED`, and `EXPORTED_REMOVED`: the VMM blocked or
+  removed an exported page. `TDH.EXPORT.MEM` exports a CANCEL operation for the page, which moves
+  it to the `BLOCKED`, `PENDING_BLOCKED`, or `FREE` state.
+
+If the export is aborted, the VMM moves the remaining exported pages back to non-exported states
+with `TDH.EXPORT.RESTORE`. If migration succeeds, the source TD is torn down.
+
+The `REMOVED` state is used only on the destination TD.
+
+- `REMOVED`: the page was removed while an import session is in progress, either by the VMM with
+  `TDH.MEM.PAGE.REMOVE` or by an imported CANCEL operation. The entry is not present, like
+  `FREE`, but the TDX module uses it to reject importing an older copy of the page to the GPA.
+
+Write-blocking export is the other export mode. Instead of using the Dirty bit, the VMM blocks pages
+for writing with `TDH.EXPORT.BLOCKW` before exporting them. A TD write to such a page causes an EPT
+violation [TD exit](#vm-exit-and-td-exit), and the VMM is expected to unblock the page with
+`TDH.EXPORT.UNBLOCKW`, and later block and re-export it. It uses the following states.
+
+- `BLOCKEDW`: the page is blocked for writing, so the CPU can no longer create new cached
+  translations for writes to it.
+- `EXPORTED_BLOCKEDW`: the page was blocked for writing and then exported.
+- `EXPORTED_DIRTY`: the page was exported, but it is not blocked for writing, so its content or
+  attributes may have changed since.
+- `EXPORTED_DIRTY_BLOCKEDW`: same as `EXPORTED_DIRTY`, but the page was blocked for writing again.
+- `PENDING_BLOCKEDW`: the page is both `PENDING` and blocked for writing.
+- `PENDING_EXPORTED_BLOCKEDW`: same as `EXPORTED_BLOCKEDW`, but the page is `PENDING`.
+- `PENDING_EXPORTED_DIRTY`: same as `EXPORTED_DIRTY`, but the page is `PENDING`.
+- `PENDING_EXPORTED_DIRTY_BLOCKEDW`: same as `EXPORTED_DIRTY_BLOCKEDW`, but the page is `PENDING`.
+
+### TDX Connect-Specific States
+
+Private MMIO pages are private pages assigned to a TDI. The following TDX Connect states are all
+leaf states and apply specifically to these pages.
+
+- `MMIO_MAPPED`: the private MMIO page is accessible to the TD.
+- `MMIO_BLOCKED`: the VMM blocked the private MMIO page with `TDH.MMIO.BLOCK`, so the CPU can no
+  longer create new cached translations to it.
+- `MMIO_PENDING`: the private MMIO page is pending acceptance by the TD using
+  `TDG.TDI.MMIO.ACCEPT`.
+
+### Non-Leaf Entry States
+
+Non-leaf SEPT entries also have states.
+
+- `NL_MAPPED`: the CPU can walk through the entry to the child SEPT page.
+- `NL_BLOCKED`: the VMM blocked the range with `TDH.MEM.RANGE.BLOCK`, so the CPU can no longer
+  create new cached translations through this entry.
+
+### SEPT State Encoding
+
+SEPT states are encoded in combinations of bits in an EPT entry. Some encoding bits also control
+processor behavior. Others are ignored by the processor.
+
+**Example 1: `MAPPED` and `BLOCKED`**
+
+Here are selected SEPT fields and their corresponding EPT bits for the `MAPPED` and `BLOCKED`
+states. Other EPT fields are omitted.
+
+| SEPT field | EPT bit(s) | `MAPPED` | `BLOCKED` |
+|------------|------------|----------|-----------|
+| R/W/X      | 2:0        | `111`    | `000`     |
+| Bits 56:53 | 56:53      | `0000`   | `0100`    |
+
+The fields mean:
+
+- R/W/X (bits 2:0): EPT read, write, and execute permissions.
+- Bits 56:53: Ignored by the processor in EPT entries. The TDX module uses them for SEPT state
+  encoding.
+
+Because `BLOCKED` clears all R/W/X permissions, an access causes an EPT violation and a
+[VM exit](#vm-exit-and-td-exit). This is exactly the behavior intended by the `BLOCKED` state.
+
+**Example 2: `MAPPED` and `MMIO_MAPPED`**
+
+Here are selected SEPT fields and their corresponding EPT bits for the `MAPPED` and `MMIO_MAPPED`
+states. Other EPT fields are omitted.
+
+| SEPT field        | EPT bit(s) | `MAPPED` | `MMIO_MAPPED` |
+|-------------------|------------|----------|---------------|
+| `IPAT`            | 6          | `1`      | `0`           |
+| EPT memory type   | 5:3        | `110` WB | `000` UC      |
+| Bits 56:53        | 56:53      | `0000`   | `0000`        |
+
+Bit 6 in the EPT entry is called "Ignore PAT memory type" (`IPAT`).
+
+- If `IPAT` is set, the processor ignores the TD PAT memory type and uses only the EPT memory type.
+- If `IPAT` is clear, the processor combines the EPT memory type with the TD PAT memory type.
+
+For definitions of WB, WC, and UC, see [Memory Types](x86-misc.md#memory-types). For background on
+PAT and EPT memory types and how they interact, see
+[Memory Cache Control](x86-misc.md#memory-cache-control).
+
+Here are the final memory types for the `MAPPED` and `MMIO_MAPPED` states.
+
+| State         | Effective Memory Type |
+|---------------|-----------------------|
+| `MAPPED`      | WB                    |
+| `MMIO_MAPPED` | WC/UC                 |
+
+Comments on the table:
+
+- `MAPPED`: `IPAT=1` makes the effective type WB regardless of the TD PAT type.
+- `MMIO_MAPPED`: `IPAT=0` combines EPT UC with the TD PAT type:
+  - WC when the TD PAT type is WC.
+  - UC for other TD PAT types.
+
+**Note**: Bits 56:53 are `0000` in both states. The difference is in `IPAT` and the EPT memory type,
+which determine the effective memory type.
