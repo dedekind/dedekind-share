@@ -3,7 +3,7 @@
 - **Author**: Artem Bityutskiy
 - **Version**: 0.1
 - **Date**: 2026-07-03
-- **Last updated**: 2026-09-06
+- **Last updated**: 2026-10-17
 
 **Disclaimer**: These notes reflect my current understanding of TDX module concepts and mechanisms
 and may contain errors or omissions. They are not an official Intel document. Refer to the
@@ -48,7 +48,6 @@ structures, intended for reference from my other documents.
     - [Enumeration CPUID\_CONFIG](#enumeration-cpuid_config)
     - [Configuration CPUID\_CONFIG](#configuration-cpuid_config)
   - [EPTP](#eptp)
-    - [EPTP Switching](#eptp-switching)
   - [TDVPS](#tdvps)
   - [VE\_INFO](#ve_info)
     - [TDX-Specific Fields](#tdx-specific-fields)
@@ -515,43 +514,28 @@ entry *i* of the enumeration `CPUID_CONFIG` array described above.
 ## EPTP
 
 The **EPTP** (Extended Page Table Pointer) is the VMCS field that points at the root of the EPT
-tree the CPU walks to translate a GPA into an HPA. Besides the root pointer it carries a few
-controls for the walk itself.
+tree the CPU walks to translate a GPA into an HPA. See [EPTP](x86-misc.md#eptp) for its layout.
 
-| Bits  | Field                   | Meaning                                                   |
-|-------|-------------------------|-----------------------------------------------------------|
-| 2:0   | Memory type             | Memory type for accessing the EPT structures. 6 is WB.    |
-| 5:3   | EPT depth               | One less than the EPT levels: 3 is 4-level, 4 is 5-level. |
-| 6     | Accessed and dirty      | Enables the accessed and dirty flags in EPT entries.      |
-| 7     | Supervisor shadow stack | Enables supervisor shadow stack access rights.            |
-| 11:8  | Reserved                | Must be 0.                                                |
-| 51:12 | Root HPA                | HPA of the top-level EPT page, 4KiB aligned.              |
-| 63:52 | Reserved                | Must be 0.                                                |
+Neither the VMM nor the TD can write the EPTP of the TD VMCS. The VMM supplies the EPTP control bits
+in the `EPTP_CONTROLS` field of [TD_PARAMS](#td_params). `TDH.MNG.INIT` validates them and combines
+them with the Secure EPT root page address into the `TDCS.EPTP` field. `TDH.VP.INIT` then copies
+`TDCS.EPTP` into the TD VMCS of each vCPU, with the HKID bits of the root address cleared.
 
-Neither the VMM nor the TD can write the EPTP. The VMM supplies the EPTP control bits in the
-`EPTP_CONTROLS` field of [TD_PARAMS](#td_params), `TDH.MNG.INIT` combines them with the Secure EPT
-root address into the `TDCS.EPTP` field, and `TDH.VP.INIT` copies that into the TD VMCS of each
-vCPU.
+In practice, the only EPTP control the VMM chooses is the EPT depth: 3 for 4-level EPT or 4 for
+5-level EPT. The other controls are fixed, and `TDH.MNG.INIT` rejects other values.
 
-### EPTP Switching
+**Notes**:
 
-**EPTP Switching** lets the VMM prepare a list of up to 512 EPTPs, from which the guest picks one
-with the `VMFUNC` instruction, without a [VM exit](tdx-misc.md#vm-exit-and-td-exit).
-
-Each EPTP is a different view of guest memory, with its own mappings and permissions. It is designed
-for things like security agents running inside the guest, which switch views depending on the
-situation.
-
-In TDX, guests cannot use the `VMFUNC` instruction to switch EPTs. Each TD VM has two EPT trees,
-Secure EPT and Shared EPT, and the `SHARED` bit of the GPA selects between them, not an EPTP index.
-
-**Linux Note**: The Linux kernel does not use EPTP switching for its own VMX guests either, so a VMX
-guest running directly on KVM cannot switch EPTs. But KVM does support the feature for nested
-virtualization, where the guest of KVM is itself a hypervisor and wants to offer EPTP switching to
-its own guests. KVM emulates it in software: it leaves the hardware feature disabled, so `VMFUNC` in
-the nested guest causes a VM exit to KVM, and KVM reads the requested EPTP from the list and
-switches the mappings itself. The nested guest sees the architectural behavior, but pays for a VM
-exit anyway.
+- The TDX module enables the EPT accessed and dirty (A/D) flags only during live migration, because
+  non-blocking export uses them to track accessed and dirty pages.
+- TDs cannot use EPTP switching. The EPTP-list address of the TD VMCS is fixed to an invalid value,
+  and `VMFUNC` is not supported.
+- The Shared EPT root is not in the EPTP. It is in a separate "Shared EPTP"TD VMCS field, which the
+  VMM writes with `TDH.VP.WR`. The `SHARED` bit of the GPA selects between the Secure EPT and the
+  Shared EPT, not an EPTP index.
+- With TD partitioning, each L2 VM has its own Secure EPT tree, and the EPTP of its L2 VMCS points
+  at the root of that tree. The L1 TD may set the supervisor shadow stack bit in that EPTP with
+  `TDG.VP.WR`, if `XFAM` enables supervisor CET state.
 
 ---
 
@@ -587,55 +571,32 @@ HPAs of TDCX pages.
 
 ## VE_INFO
 
-The **VE_INFO** (virtualization exception information area) is a memory area that carries the
-details of a [#VE](tdx-misc.md#ve). It is per vCPU, it is allocated when the vCPU is created, and
-the VMCS of the vCPU holds a pointer to it. The first 34 bytes are architectural, and whoever raises
-the `#VE` fills them in: the CPU for an EPT violation, or the TDX module when it injects a `#VE`
-itself.
+`VE_INFO` is the TDX name for the per vCPU
+[virtualization exception information area](x86-misc.md#virtualization-exception-information-area),
+which carries the details of a [#VE](tdx-misc.md#ve). This section describes the TDX-specific
+aspects of the area.
 
-Intel SDM requires the VE_INFO address to be 4KiB-aligned, but does not require the area to be of
-any certain size.
+`VE_INFO` is part of the [TDVPS](#tdvps). It occupies the first 128 bytes of the TDVPR page, which
+makes it 4KiB-aligned. `TDH.VP.INIT` points the virtualization exception information address of the
+TD VMCS at it. The first 34 bytes are architectural and defined by Intel SDM. The TDX module adds
+more fields after them, described below.
 
-- The TDX module gives it a full 4KiB page inside the [TDVPS](#tdvps), and uses the space beyond the
-  first 34 bytes for the [TDX-specific fields](#tdx-specific-fields).
-- Linux KVM also allocates a 4KiB page for VMX guests, but it defines only the architectural fields
-  and never uses the rest.
+For a VMX guest, the CPU fills in the area when an EPT violation causes a `#VE`. For a TD, the CPU
+does the same for an EPT violation on shared memory. The TDX module fills in `VE_INFO` itself when
+it injects a `#VE`. This happens for an EPT violation on private memory, and for operations the TDX
+module virtualizes on behalf of the TD, such as an MSR read (`EXIT_REASON` 31) or `CPUID`
+(`EXIT_REASON` 10).
 
-The fields in the architectural part of the VE_INFO area hold the values that would have gone into
-the VMCS if a VM exit had happened instead of the `#VE`.
+The TD cannot access `VE_INFO` directly, because the TDVPS is not accessible to it. Instead, it calls
+the `TDG.VP.VEINFO.GET` tdcall, which returns most `VE_INFO` fields in GPRs and clears `VALID`.
+`EPTP_INDEX` is not returned. The TD must call `TDG.VP.VEINFO.GET` before it can receive another
+`#VE`.
 
-| Offset | Field                | Meaning                                                        |
-|--------|----------------------|----------------------------------------------------------------|
-| 0      | `EXIT_REASON`        | The VM exit reason, e.g., EPT violation (48) or MSR read (31). |
-| 4      | `VALID`              | 0 means VE_INFO is free, 0xFFFFFFFF means it holds a `#VE`.    |
-| 8      | `EXIT_QUALIFICATION` | Exit qualification value.                                      |
-| 16     | `GLA`                | Guest linear address.                                          |
-| 24     | `GPA`                | Guest physical address.                                        |
-| 32     | `EPTP_INDEX`         | Current EPTP index VM-execution control.                       |
-
-`EXIT_REASON` tells what caused the `#VE`. In case of an EPT violation the CPU raises the
-`#VE` and writes 48, which is the only value the CPU ever writes. But a `#VE` can also be
-injected by software, for example the TDX module injects one when it virtualizes an operation on
-behalf of the TD, and then the value is the reason of that operation, such as MSR read (31) or
-`CPUID` (10).
-
-`VALID` marks the VE_INFO area as "occupied". Whoever raises the `#VE` sets it to 0xFFFFFFFF, and
-the guest writes 0 back when it is done. A VMX guest does it directly, a TD calls
-`TDG.VP.VEINFO.GET`, which hands over VE_INFO and clears `VALID`.
-
-`EXIT_QUALIFICATION` carries extra details, and its meaning depends on `EXIT_REASON`. For an EPT
-violation it includes whether the access was a read, a write, or an instruction fetch, and several
-other bits.
-
-`GLA` is the address the guest used, before paging translated it (see
-[GLA and GVA](x86-misc.md#gla-and-gva)).
-
-`EPTP_INDEX` identifies which EPTP in the list was active, so the handler knows which EPT the
-violation happened in. Not relevant for TDX guests. See [EPTP](#eptp) for details.
+`EPTP_INDEX` is not relevant for TDs, because TDs cannot use EPTP switching (see [EPTP](#eptp)).
 
 ### TDX-Specific Fields
 
-In addition to the architectural 34 bytes, the TDX module maintains its own fields in the VE_INFO
+In addition to the architectural 34 bytes, the TDX module maintains its own fields in the `VE_INFO`
 area. The TD reads both the architectural and the TDX-specific fields with the same
 `TDG.VP.VEINFO.GET` tdcall. Here are some of the TDX-specific fields.
 
@@ -643,8 +604,14 @@ area. The TD reads both the architectural and the TDX-specific fields with the s
   to `RIP` to resume past the instruction it just emulated.
 - `INSTRUCTION_INFORMATION` and `EXTENDED_INSTRUCTION_INFORMATION` describe the operands, such as
   the registers and the address size, so that the `#VE` handler could emulate the operation.
+  `TDG.VP.VEINFO.GET` returns `EXTENDED_INSTRUCTION_INFORMATION` only with version 2, and only if
+  `XFAM` enables APX.
 - The `CATEGORY` byte, which tells the TD what kind of event it is looking at. See
-  [#VE Categories](tdx-misc.md#ve-categories) for the values and their meaning.
+  [#VE](tdx-misc.md#ve) for the values and their meaning.
+
+The instruction fields are defined only for a `#VE` caused by instruction execution, such as
+`CPUID`, `RDMSR` or `HLT`. They are not defined for an EPT violation (`EXIT_REASON` 48), and the
+`#VE` handler has to decode the faulting instruction itself.
 
 Support for `CATEGORY` is enumerated by `TDX_FEATURES0.VE_REDUCTION` (bit 30), and the TD gets it by
 calling `TDG.VP.VEINFO.GET` with version 1 or higher.

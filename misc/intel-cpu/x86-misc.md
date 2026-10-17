@@ -3,7 +3,7 @@
 - **Author**: Artem Bityutskiy
 - **Version**: 0.1
 - **Date**: 2026-07-13
-- **Last updated**: 2026-10-16
+- **Last updated**: 2026-10-17
 
 **Disclaimer**: This document reflects my current understanding of various Intel CPU concepts and
 mechanisms, but it may contain errors or omissions. It is not an official Intel document and should
@@ -32,6 +32,9 @@ architecture, intended for reference from my other documents.
     - [Features and XSAVE Components](#features-and-xsave-components)
     - [State Component Enumeration](#state-component-enumeration)
     - [Valid XCR0 and IA32\_XSS Values](#valid-xcr0-and-ia32_xss-values)
+  - [EPTP](#eptp)
+    - [EPTP Switching](#eptp-switching)
+  - [Virtualization Exception Information Area](#virtualization-exception-information-area)
 
 ---
 
@@ -236,7 +239,7 @@ Here is the complete combination table from Intel SDM.
 
 For VM accesses, EPT translates a GPA to a host physical address. The EPT memory type is encoded in
 bits 5:3 of the final EPT entry used for the translation. This is separate from the memory type
-field in the EPT pointer (EPTP), which controls accesses to the EPT paging structures.
+field in the [EPTP](#eptp), which controls accesses to the EPT paging structures.
 
 ### VM Accesses
 
@@ -370,3 +373,91 @@ illegal value with `XSETBV` or `WRMSR` causes `#GP(0)`. The rules are the follow
 This dependency rule applies only to the `XCR0` and `IA32_XSS` enablement masks. It does not apply
 to the instruction mask operand used by the XSAVE family instructions. Software may still choose any
 subset of the enabled components when calling `XSAVE`, `XRSTOR`, `XSAVES`, or `XRSTORS`.
+
+---
+
+## EPTP
+
+The **EPTP** (Extended Page Table Pointer) is the VMCS field that points at the root of the EPT
+tree the CPU walks to translate a GPA into an HPA. Besides the root pointer it carries a few
+controls for the walk itself.
+
+| Bits  | Field                   | Meaning                                                   |
+|-------|-------------------------|-----------------------------------------------------------|
+| 2:0   | Memory type             | Memory type for accessing the EPT structures: 0 is UC, 6 is WB. |
+| 5:3   | EPT depth               | One less than the EPT levels: 3 is 4-level, 4 is 5-level.       |
+| 6     | Accessed and dirty      | Enables the accessed and dirty flags in EPT entries.            |
+| 7     | Supervisor shadow stack | Enables supervisor shadow stack access rights.                  |
+| 11:8  | Reserved                | Must be 0.                                                      |
+| 51:12 | Root HPA                | HPA of the top-level EPT page, 4KiB aligned.                    |
+| 63:52 | Reserved                | Must be 0.                                                      |
+
+The root HPA occupies bits MAXPHYADDR-1:12. The table assumes a MAXPHYADDR of 52. With a smaller
+MAXPHYADDR, the bits from MAXPHYADDR to 51 are reserved too.
+
+### EPTP Switching
+
+**EPTP Switching** lets the VMM prepare a list of up to 512 EPTPs, from which the guest picks one
+with the `VMFUNC` instruction, without a [VM exit](tdx-misc.md#vm-exit-and-td-exit).
+
+Each EPTP is a different view of guest memory, with its own mappings and permissions. It is designed
+for things like security agents running inside the guest, which switch views depending on the
+situation.
+
+**Linux Note**: The Linux kernel does not use EPTP switching for its own VMX guests, so a VMX guest
+running directly on KVM cannot switch EPTs. But KVM does support the feature for nested
+virtualization, where the guest of KVM is itself a hypervisor and wants to offer EPTP switching to
+its own guests. KVM emulates it in software: it leaves the hardware feature disabled, so `VMFUNC` in
+the nested guest causes a VM exit to KVM, and KVM reads the requested EPTP from the list and
+switches the mappings itself. The nested guest sees the architectural behavior, but pays for a VM
+exit anyway.
+
+---
+
+## Virtualization Exception Information Area
+
+The **virtualization exception information area** is a memory area that carries the details of a
+[#VE](tdx-misc.md#ve). TDX specifications call it `VE_INFO`, and this section uses the same name.
+It is per vCPU, and the VMCS of the vCPU holds its physical address. The first 34 bytes are
+architectural, and whoever raises the `#VE` fills them in: the CPU for an EPT violation, or software
+that injects a `#VE`, such as the TDX module (see [VE_INFO](tdx-structs.md#ve_info)).
+
+Intel SDM requires the `VE_INFO` address to be 4KiB-aligned, but does not require the area to be of
+any certain size.
+
+**Linux Note**: KVM does not use `#VE` for VMX guests. It enables EPT-violation `#VE` only with the
+`CONFIG_KVM_INTEL_PROVE_VE` debug option, which intercepts every `#VE` and warns about it, to check
+that KVM never lets a guest receive one. In this case, KVM allocates a 4KiB page per vCPU for
+`VE_INFO`, defines only the architectural fields, and never uses the rest of the page.
+
+`EXIT_REASON`, `EXIT_QUALIFICATION`, `GLA` and `GPA` hold the values that would have gone into the
+VMCS if a VM exit had happened instead of the `#VE`.
+
+| Offset | Field                | Meaning                                                        |
+|--------|----------------------|----------------------------------------------------------------|
+| 0      | `EXIT_REASON`        | The VM exit reason, e.g., EPT violation (48) or MSR read (31). |
+| 4      | `VALID`              | 0 means `VE_INFO` is free, 0xFFFFFFFF means it holds a `#VE`.  |
+| 8      | `EXIT_QUALIFICATION` | Exit qualification value.                                      |
+| 16     | `GLA`                | Guest linear address.                                          |
+| 24     | `GPA`                | Guest physical address.                                        |
+| 32     | `EPTP_INDEX`         | Current EPTP index VM-execution control.                       |
+
+`EXIT_REASON` tells what caused the `#VE`. In case of an EPT violation the CPU raises the `#VE` and
+writes 48, which is the only value the CPU ever writes. But a `#VE` can also be injected by
+software, and then the value is the reason of the operation the software virtualized, such as MSR
+read (31) or `CPUID` (10).
+
+`VALID` marks the `VE_INFO` area as "occupied". Whoever raises the `#VE` sets it to 0xFFFFFFFF, and
+the guest writes 0 back when it is done. While `VALID` is not 0, an EPT violation causes a VM exit
+instead of a `#VE`.
+
+`EXIT_QUALIFICATION` carries extra details, and its meaning depends on `EXIT_REASON`. For an EPT
+violation it includes whether the access was a read, a write, or an instruction fetch, and several
+other bits.
+
+`GLA` is the address the guest used, before paging translated it (see [GLA and GVA](#gla-and-gva)).
+For an EPT violation, it is valid only if the "guest linear address valid" bit (bit 7) of
+`EXIT_QUALIFICATION` is 1.
+
+`EPTP_INDEX` identifies which EPTP in the list was active, so the handler knows which EPT the
+violation happened in. See [EPTP](#eptp) for details.

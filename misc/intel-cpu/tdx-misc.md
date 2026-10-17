@@ -3,7 +3,7 @@
 - **Author**: Artem Bityutskiy
 - **Version**: 0.1
 - **Date**: 2026-07-03
-- **Last updated**: 2026-10-16
+- **Last updated**: 2026-10-17
 
 **Disclaimer**: These notes reflect my current understanding of TDX module concepts and mechanisms
 and may contain errors or omissions. They are not an official Intel document. Refer to the
@@ -466,100 +466,6 @@ retry whenever it encounters a busy status.
 
 ---
 
-## VE_INFO
-
-The **VE_INFO** (virtualization exception information area) is a memory area that carries the
-details of a [#VE](#ve). It is per vCPU, it is allocated when the vCPU is created, and the VMCS of
-the vCPU holds a pointer to it. The first 34 bytes are architectural, and whoever raises the `#VE`
-fills them in: the CPU for an EPT violation, or the TDX module when it injects a `#VE` itself.
-
-Intel SDM requires the VE_INFO address to be 4KiB-aligned, but does not require the area to be of
-any certain size.
-
-- The TDX module gives it a full 4KiB page inside the [TDVPS](tdx-structs.md#tdvps), and uses the
-  space beyond the first 34 bytes for TDX-extended `#VE`s, discussed below.
-- Linux KVM also allocates a 4KiB page for VMX guests, but it defines only the architectural fields
-  and never uses the rest.
-
-The fields in the architectural part of the VE_INFO area hold the values that would have gone into
-the VMCS if a VM exit had happened instead of the `#VE`.
-
-| Offset | Field                | Meaning                                                        |
-|--------|----------------------|----------------------------------------------------------------|
-| 0      | `EXIT_REASON`        | The VM exit reason, e.g., EPT violation (48) or MSR read (31). |
-| 4      | `VALID`              | 0 means VE_INFO is free, 0xFFFFFFFF means it holds a `#VE`.    |
-| 8      | `EXIT_QUALIFICATION` | Exit qualification value.                                      |
-| 16     | `GLA`                | Guest linear address.                                          |
-| 24     | `GPA`                | Guest physical address.                                        |
-| 32     | `EPTP_INDEX`         | Current EPTP index VM-execution control.                       |
-
-`EXIT_REASON` tells what caused the `#VE`. In case of an EPT violation the CPU raises the
-`#VE` and writes 48, which is the only value the CPU ever writes. But a `#VE` can also be
-injected by software, for example the TDX module injects one when it virtualizes an operation on
-behalf of the TD, and then the value is the reason of that operation, such as MSR read (31) or
-`CPUID` (10).
-
-`VALID` marks the VE_INFO area as "occupied". Whoever raises the `#VE` sets it to 0xFFFFFFFF, and
-the guest writes 0 back when it is done. A VMX guest does it directly, a TD calls
-`TDG.VP.VEINFO.GET`, which hands over VE_INFO and clears `VALID`.
-
-`EXIT_QUALIFICATION` carries extra details, and its meaning depends on `EXIT_REASON`. For an EPT
-violation it includes whether the access was a read, a write, or an instruction fetch, and several
-other bits.
-
-`GLA` is the address the guest used, before paging translated it (see
-[GLA and GVA](x86-misc.md#gla-and-gva)).
-
-`EPTP_INDEX` identifies which EPTP in the list was active, so the handler knows which EPT the
-violation happened in. Not relevant for TDX guests. See [EPTP](tdx-structs.md#eptp) for details.
-
-### TDX-Specific Fields
-
-In addition to the architectural 34 bytes, the TDX module maintains its own fields in the VE_INFO
-area. The TD reads both the architectural and the TDX-specific fields with the same
-`TDG.VP.VEINFO.GET` tdcall. Here are some of the TDX-specific fields.
-
-- `INSTRUCTION_LENGTH` is the length of the instruction that caused the `#VE`. The handler adds it
-  to `RIP` to resume past the instruction it just emulated.
-- `INSTRUCTION_INFORMATION` and `EXTENDED_INSTRUCTION_INFORMATION` describe the operands, such as
-  the registers and the address size, so that the `#VE` handler could emulate the operation.
-- The `CATEGORY` byte, which tells the TD what kind of event it is looking at.
-
-Support for `CATEGORY` is enumerated by `TDX_FEATURES0.VE_REDUCTION` (bit 30), and the TD gets it by
-calling `TDG.VP.VEINFO.GET` with version 1 or higher.
-
-| Value | Category              | Meaning                                                    |
-|-------|-----------------------|------------------------------------------------------------|
-| 0x00  | `ARCH`                | An EPT violation.                                          |
-| 0x01  | `PENDING`             | SEPT violation: TD accessed a PENDING page.                |
-| 0x02  | `RESERVED_GPA_BITS`   | GPA bits above the `MAXGPA` range were set, a TD bug.      |
-| 0x10  | `CONFIG_PARAVIRT`     | Feature the VMM configured to be paravirtualized.          |
-| 0x11  | `NON_CONFIG_PARAVIRT` | Feature that must be paravirtualized.                      |
-| 0x80  | `UNSUPPORTED_FEATURE` | The TD used an x86 feature TDX does not support, a TD bug. |
-
-A **feature** here is not an instruction, but what the instruction acts on. For example, `RDMSR` on
-`MSR_PLATFORM_INFO` and `RDMSR` on another MSR are different features, and the TDX module may let
-one through to the hardware, emulate another, and give a `#VE` on a third. Similarly for `CPUID`,
-where the decision is per leaf and sub-leaf. But operandless instructions like `HLT` and `WBINVD`
-are features in themselves.
-
-The `NON_CONFIG_PARAVIRT` category indicates that the feature does not depend on the TD
-configuration. If the TD does not handle it, it is a broken TD.
-
-The `CONFIG_PARAVIRT` category indicates that the feature depends on the TD configuration. If the
-TD does not handle it, it means that the TD refuses to support the feature. For example, if the
-feature requires communicating with the VMM via `TDG.VP.VMCALL`, the TD may choose to refuse to
-handle it because it does not trust the VMM. Instead, it may choose to treat it as `#GP(0)`, which
-means `SIGSEGV` for userspace and an OOPS for the kernel.
-
-**Note**: TDX specifications use the notation like `#VE(ARCH)`, which means a `#VE` of the `ARCH`
-category.
-
-**Linux Note**: As of version 7.2, the Linux kernel does not use the `CATEGORY` field. It uses
-`TDG.VP.VEINFO.GET` with version 0 instead of version 1 or higher.
-
----
-
 ## #VE
 
 **#VE** (Virtualization Exception) is x86 exception vector 20. It is not specific to TDX. Plain VMX
@@ -584,6 +490,42 @@ A TD can get two types of `#VE`, and they differ in what triggers them and in wh
   access, or an instruction like `HLT`. The architecture never turns these into a `#VE`, hence the
   "extended" part, and only the TDX module can produce one, always after a VM exit into the module.
 
+### #VE Categories
+
+The `CATEGORY` byte of [VE_INFO](tdx-structs.md#ve_info) tells the TD what kind of event it is
+looking at.
+
+| Value | Category              | Meaning                                                    |
+|-------|-----------------------|------------------------------------------------------------|
+| 0x00  | `ARCH`                | An EPT violation.                                          |
+| 0x01  | `PENDING`             | EPT violation on a `PENDING` page.                         |
+| 0x02  | `RESERVED_GPA_BITS`   | GPA bit above `MAXGPA` (not `SHARED`) set, a TD bug.       |
+| 0x10  | `CONFIG_PARAVIRT`     | Feature the VMM configured to be paravirtualized.          |
+| 0x11  | `NON_CONFIG_PARAVIRT` | Feature that must be paravirtualized.                      |
+| 0x80  | `UNSUPPORTED_FEATURE` | The TD used an x86 feature TDX does not support, a TD bug. |
+
+A **feature** here is not an instruction, but what the instruction acts on. For example, `RDMSR` on
+`MSR_PLATFORM_INFO` and `RDMSR` on another MSR are different features, and the TDX module may let
+one through to the hardware, emulate another, and give a `#VE` on a third. Similarly for `CPUID`,
+where the decision is per leaf and sub-leaf. But operandless instructions like `HLT` and `WBINVD`
+are features in themselves.
+
+The `NON_CONFIG_PARAVIRT` category indicates that the feature does not depend on the TD
+configuration. If the TD does not handle it, it is a broken TD.
+
+The `CONFIG_PARAVIRT` category indicates that the feature depends on the TD configuration. The TD
+either handles it, or treats it as an error caused by an incorrect VMM configuration. In the latter
+case, the TD refuses to support the feature. For example, if the feature requires communicating
+with the VMM via `TDG.VP.VMCALL`, the TD may choose to refuse to handle it because it does not trust
+the VMM. Instead, it may choose to treat it as `#GP(0)`, which means `SIGSEGV` for userspace and an
+OOPS for the kernel.
+
+**Note**: TDX specifications use the notation like `#VE(ARCH)`, which means a `#VE` of the `ARCH`
+category.
+
+**Linux Note**: As of version 7.2, the Linux kernel does not use the `CATEGORY` field. It uses
+`TDG.VP.VEINFO.GET` with version 0 instead of version 1 or higher.
+
 ### Architectural #VE
 
 Architectural `#VE` is the same mechanism for a VMX guest and for a TD's shared memory accesses.
@@ -595,9 +537,11 @@ the following conditions.
   TD the TDX module controls it, and it is always set.
 - Bit 63 of the EPT entry is 0. This bit means **suppress #VE**, so it is a per page decision, made
   by whoever owns the page tables (VMM for shared memory, TDX module for private memory).
-- `VE_INFO.VALID` is 0, which indicates that the VE_INFO area is empty, as opposed to holding
+- `VE_INFO.VALID` is 0, which indicates that the `VE_INFO` area is empty, as opposed to holding
   information from a previous `#VE` that the guest has not cleared, and therefore supposedly has not
-  handled. Refer to [VE_INFO](tdx-structs.md#ve_info) for details.
+  handled. Refer to
+  [virtualization exception information area](x86-misc.md#virtualization-exception-information-area)
+  for details.
 
 A TD has two EPT trees: the Secure EPT for private GPAs and the Shared EPT for shared GPAs, and the
 `SHARED` bit of the GPA selects between them. Both are ordinary EPTs as far as the CPU is concerned,
