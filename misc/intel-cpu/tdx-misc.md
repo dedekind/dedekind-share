@@ -35,6 +35,7 @@ concepts, intended for reference from my other documents.
   - [#VE](#ve)
     - [Architectural #VE](#architectural-ve)
     - [TDX-Extended #VE](#tdx-extended-ve)
+  - [TD Operation States](#td-operation-states)
   - [SEPT Page States](#sept-page-states)
     - [Leaf Entry States](#leaf-entry-states)
     - [Live Migration-Specific States](#live-migration-specific-states)
@@ -326,6 +327,64 @@ There are three main sources.
 
 Additionally, the TDX module can use `#VE` to notify the TD about anomalous behavior, such as
 repeated EPT violations on the same instruction with no progress.
+
+---
+
+## TD Operation States
+
+**OP_STATE** (operation state) is the current state of a TD in the TD operation state machine,
+which controls what the TD can do. It is stored in [TDCS](tdx-structs.md#tdcs). The baseline
+states are the following.
+
+- `UNALLOCATED`: TDCS consists of multiple pages, added one at a time with `TDH.MNG.ADDCX`. The TD
+  stays in this state until all required TDCS pages have been added. This state has no `OP_STATE`
+  value in TDCS, because TDCS is not fully allocated yet.
+- `UNINITIALIZED`: entered once all required TDCS pages have been added. TDCS is allocated but not
+  yet initialized.
+- `INITIALIZED`: entered after `TDH.MNG.INIT` initializes TDCS. The TD is being built: memory is
+  added and measured, and vCPUs are created.
+- `RUNNABLE`: entered after `TDH.MR.FINALIZE` completes the TD build. The TD is allowed to run.
+  This is the same state whether the TD has been entered or never ran.
+
+Live migration adds more `OP_STATE` values. On the source TD:
+
+- `START_EXPORT`: `TDH.EXPORT.STATE.IMMUTABLE` was interrupted and has not been resumed yet. The TD
+  can still run.
+- `LIVE_EXPORT`: entered when `TDH.EXPORT.STATE.IMMUTABLE` completes. The TD can still run while
+  memory is exported.
+- `PAUSED_EXPORT`: entered by `TDH.EXPORT.PAUSE`. No vCPU may run. Mutable TD and vCPU state is
+  exported with `TDH.EXPORT.STATE.TD` and `TDH.EXPORT.STATE.VP`, and memory export continues.
+- `POST_EXPORT`: entered once the start token has been exported with `TDH.EXPORT.TRACK`. The TD
+  cannot run anymore, but the destination may already be running and requesting remaining pages on
+  demand (post-copy), so memory can still be exported.
+
+**Note**: if TDX Connect is enabled for the source TD, on-demand page delivery is not allowed in
+`POST_EXPORT`. Instead, all pages must have been exported in `LIVE_EXPORT` or `PAUSED_EXPORT`,
+before `TDH.EXPORT.TRACK`.
+
+The only way for the source TD `OP_STATE` to return to `RUNNABLE` is the abort path,
+`TDH.EXPORT.ABORT`. In `POST_EXPORT`, the abort requires an abort token from the destination,
+confirming that the destination TD will not run. There is no successful completion path: the source
+TD cannot run after a successful migration, a security rule enforced by the TDX module. The host VMM
+should tear down the source TD instead.
+
+On the destination TD, the import starts from `UNINITIALIZED`, and `TDH.MNG.INIT` is never called:
+
+- `START_IMPORT`: `TDH.IMPORT.STATE.IMMUTABLE` was interrupted and has not been resumed yet.
+- `MEMORY_IMPORT`: entered when `TDH.IMPORT.STATE.IMMUTABLE` completes. TD memory can be imported.
+- `STATE_IMPORT`: entered by `TDH.IMPORT.STATE.TD`. vCPU state can be imported, and memory import
+  continues.
+- `POST_IMPORT`: entered once the start token has been imported with `TDH.IMPORT.TRACK`. The
+  destination TD cannot run yet, but memory import can continue into GPAs that have no page yet.
+- `LIVE_IMPORT`: entered by `TDH.IMPORT.COMMIT`. The destination TD can run. Memory import can
+  still continue in the background, possibly on demand (post-copy), triggered by an EPT violation
+  when the TD accesses a page that has not been imported yet.
+- `FAILED_IMPORT`: entered on an import error before `TDH.IMPORT.COMMIT`, or when the VMM aborts the
+  import with `TDH.IMPORT.ABORT`. The TD will never run and can only be torn down. An import error
+  in `LIVE_IMPORT` does not lead here. It ends the import session and moves the TD to `RUNNABLE`.
+
+`TDH.IMPORT.END` ends the import session and moves the destination TD to `RUNNABLE`, either from
+`LIVE_IMPORT` or directly from `POST_IMPORT`.
 
 ---
 
