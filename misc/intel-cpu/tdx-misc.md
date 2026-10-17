@@ -543,7 +543,7 @@ the following conditions.
   [virtualization exception information area](x86-misc.md#virtualization-exception-information-area)
   for details.
 
-A TD has two EPT trees: the Secure EPT for private GPAs and the Shared EPT for shared GPAs, and the
+A TD has two EPT trees: the SEPT for private GPAs and the Shared EPT for shared GPAs, and the
 `SHARED` bit of the GPA selects between them. Both are ordinary EPTs as far as the CPU is concerned,
 so a failed walk in either one is an EPT violation, exit reason 48. There is no separate "SEPT
 violation".
@@ -554,11 +554,11 @@ or not comes down to bit 63 alone, and that bit is owned differently for the two
 - **Shared memory**: The VMM owns the Shared EPT and controls bit 63 per page. This is how MMIO is
   emulated. The TD gets a `#VE(ARCH)`, decodes the faulting instruction, and forwards the access
   to the VMM with `TDG.VP.VMCALL`.
-- **Private memory**: The TDX module owns the Secure EPT and always sets bit 63 to 1, so the CPU
-  never raises a `#VE`. The EPT violation becomes a [VM exit](#vm-exit-and-td-exit) into the TDX
-  module, which reads the SEPT entry and decides how to handle it, depending on its state.
-  Unlike the shared memory case, the CPU itself never injects the `#VE` here, only the module does,
-  emulating the architectural mechanism.
+- **Private memory**: The TDX module owns the SEPT and always sets bit 63 to 1, so the CPU never
+  raises a `#VE`. The EPT violation becomes a [VM exit](#vm-exit-and-td-exit) into the TDX module,
+  which reads the SEPT entry and decides how to handle it, depending on its state. Unlike the shared
+  memory case, the CPU itself never injects the `#VE` here, only the module does, emulating the
+  architectural mechanism.
   - One possibility is to inject a `#VE`. Today, this happens when the page is in the `PENDING` or
     `PENDING_EXPORTED_DIRTY` state. The module injects a `#VE(PENDING)`, so that the TD can accept
     the page with `TDG.MEM.PAGE.ACCEPT`.

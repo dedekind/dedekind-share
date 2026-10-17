@@ -73,7 +73,7 @@ state and configuration of the TD. Examples of the kinds of data it contains inc
 - The RTMRs (Run-Time extendable Measurement Registers).
 - Migration policy `MIG_SETUP_TD_POLICY_HASH`, migration epoch counters, migration keys, and other
   live migration metadata.
-- The Secure EPT root page pointer.
+- The SEPT root page pointer.
 
 The TDCS physical layout is non-architectural and subject to change. It is an internal
 multi-page TDX module structure. The VMM does not need to know the HPAs of TDCS pages. The TDX
@@ -518,7 +518,7 @@ tree the CPU walks to translate a GPA into an HPA. See [EPTP](x86-misc.md#eptp) 
 
 Neither the VMM nor the TD can write the EPTP of the TD VMCS. The VMM supplies the EPTP control bits
 in the `EPTP_CONTROLS` field of [TD_PARAMS](#td_params). `TDH.MNG.INIT` validates them and combines
-them with the Secure EPT root page address into the `TDCS.EPTP` field. `TDH.VP.INIT` then copies
+them with the SEPT root page address into the `TDCS.EPTP` field. `TDH.VP.INIT` then copies
 `TDCS.EPTP` into the TD VMCS of each vCPU, with the HKID bits of the root address cleared.
 
 In practice, the only EPTP control the VMM chooses is the EPT depth: 3 for 4-level EPT or 4 for
@@ -531,10 +531,10 @@ In practice, the only EPTP control the VMM chooses is the EPT depth: 3 for 4-lev
 - TDs cannot use EPTP switching. The EPTP-list address of the TD VMCS is fixed to an invalid value,
   and `VMFUNC` is not supported.
 - The Shared EPT root is not in the EPTP. It is in a separate "Shared EPTP"TD VMCS field, which the
-  VMM writes with `TDH.VP.WR`. The `SHARED` bit of the GPA selects between the Secure EPT and the
-  Shared EPT, not an EPTP index.
-- With TD partitioning, each L2 VM has its own Secure EPT tree, and the EPTP of its L2 VMCS points
-  at the root of that tree. The L1 TD may set the supervisor shadow stack bit in that EPTP with
+  VMM writes with `TDH.VP.WR`. The `SHARED` bit of the GPA selects between the SEPT and the Shared
+  EPT, not an EPTP index.
+- With TD partitioning, each L2 VM has its own SEPT tree, and the EPTP of its L2 VMCS points at the
+  root of that tree. The L1 TD may set the supervisor shadow stack bit in that EPTP with
   `TDG.VP.WR`, if `XFAM` enables supervisor CET state.
 
 ---
