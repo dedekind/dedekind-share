@@ -30,9 +30,23 @@ concepts, intended for reference from my other documents.
   - [VM Exit and TD Exit](#vm-exit-and-td-exit)
   - [Host State Across TDH.VP.ENTER](#host-state-across-tdhvpenter)
     - [SEAM Transition Detail](#seam-transition-detail)
-  - [VE\_INFO](#ve_info)
-    - [TDX-Specific Fields](#tdx-specific-fields)
+  - [Status Codes](#status-codes)
+    - [Recoverability Hints](#recoverability-hints)
+  - [Interruptible Seamcalls](#interruptible-seamcalls)
+    - [Resumable vs Restartable](#resumable-vs-restartable)
+    - [Non-Extension Seamcalls](#non-extension-seamcalls)
+    - [Extension Seamcalls](#extension-seamcalls)
+    - [Concurrency as a Reason to Interrupt](#concurrency-as-a-reason-to-interrupt)
+    - [Must the VMM Resume?](#must-the-vmm-resume)
+    - [Interrupted Exit Codes](#interrupted-exit-codes)
+  - [Host Priority](#host-priority)
+    - [Problem Statement](#problem-statement)
+    - [Solution](#solution)
+    - [Timeout Mechanism](#timeout-mechanism)
+    - [Status Codes Summary](#status-codes-summary)
+    - [Is Retry Mandatory?](#is-retry-mandatory)
   - [#VE](#ve)
+    - [#VE Categories](#ve-categories)
     - [Architectural #VE](#architectural-ve)
     - [TDX-Extended #VE](#tdx-extended-ve)
   - [TD Operation States](#td-operation-states)
@@ -127,6 +141,328 @@ SEAM-transfer VMCS.
 **Note**: "State" in the table does not mean full CPU state. Some pieces of state may be saved
 only, some restored only, and some are neither saved nor restored by the hardware. The VMM or the
 TDX module may handle them explicitly.
+
+---
+
+## Status Codes
+
+TDX seamcalls and tdcalls return a 64-bit completion status in `RAX`. This includes
+[TD exits](#vm-exit-and-td-exit), which complete the `TDH.VP.ENTER` seamcall, so its status reports
+how the TD exited. The status has the following structure.
+
+```text
+ 63      60 59        48 47       40 39          32 31             0
++----------+------------+-----------+--------------+----------------+
+|  FLAGS   |  RESERVED  |   CLASS   |  DETAILS_L1  |   DETAILS_L2   |
++----------+------------+-----------+--------------+----------------+
+```
+
+Here is a more detailed breakdown.
+
+| Bits  | Name                       | Meaning                                          |
+|-------|----------------------------|--------------------------------------------------|
+| 63    | `ERROR`                    | The function was aborted because of an error.    |
+| 62    | `NON_RECOVERABLE`          | Recoverability hint, details below.              |
+| 61    | `FATAL`                    | Seamcalls only, the TD can only be torn down.    |
+| 60    | `HOST_RECOVERABILITY_HINT` | Recoverability hint from the VMM, details below. |
+| 59:48 | Reserved                   | Set to 0.                                        |
+| 47:40 | `CLASS`                    | Status class. For example, 2 is "Resource Busy". |
+| 39:32 | `DETAILS_L1`               | Distinguishes base values within the class.      |
+| 31:0  | `DETAILS_L2`               | Additional details.                              |
+
+TDX status codes consist of two halves that carry independent information.
+
+- **Upper half** (bits 63:32): what happened. TDX specifications refer to it with two terms:
+  - **Base value**: the upper half written as a 64-bit value with `DETAILS_L2` set to 0, for
+    example `0x8000020000000000`.
+  - **Status name**: the symbolic name of a base value, for example `TDX_OPERAND_BUSY`. There is
+    one name per base value.
+- **Lower half** (bits 31:0): additional details specific to the base value. Each base value may
+  define its own interpretation of these bits.
+
+Most often the lower half holds the **operand ID**, naming the operand that the base value refers
+to. The operand ID of a SEPT entry is `SEPT_ENTRY`, 147 (0x93), so a busy SEPT entry gives:
+
+```text
+TDX_OPERAND_BUSY(SEPT_ENTRY) = 0x8000020000000000 | 0x93 = 0x8000020000000093
+```
+
+TDX specifications write such combined values as `TDX_OPERAND_BUSY(SEPT_ENTRY)`.
+
+Operands are of two kinds:
+
+- **Explicit**: the GPRs the caller passes in, and components of explicit inputs. GPR operand IDs
+  encode the register number, for example `RCX` is 1 and `RDX` is 2. Components of explicit
+  inputs have IDs from 64, for example `TD_PARAMS.ATTRIBUTES` is 64.
+- **Implicit**: resources the seamcall or tdcall touches, such as the TDR page (128), the TDCS
+  (144), the TDVPS (145), or a SEPT entry (147).
+
+Other base values use the lower half differently:
+
+| Status name                            | `DETAILS_L2`                                 |
+|----------------------------------------|----------------------------------------------|
+| `TDX_SUCCESS` from `TDH.VP.ENTER`      | TD exit reason.                              |
+| `TDX_SUCCESS` from a list operation    | Number of list entries that failed.          |
+| `TDX_INCORRECT_MSR_VALUE`              | MSR index.                                   |
+| `TDX_CPUID_MAX_SUBLEAVES_UNRECOGNIZED` | CPUID leaf.                                  |
+| `TDX_TD_VMCS_FIELD_NOT_INITIALIZED`    | VMCS field code.                             |
+| `TDX_EVENT_FILTER_INVALID`             | Position of the bad event in the input list. |
+| `TDX_INVALID_PKG_ID`                   | Package ID.                                  |
+
+### Recoverability Hints
+
+`NON_RECOVERABLE` is a hint. It means that an error is probably not recoverable, or, in the
+`TDH.VP.ENTER` status, that the TD failed in a non-recoverable way.
+
+`HOST_RECOVERABILITY_HINT` lets the VMM tell the TD whether a failed tdcall is worth retrying. When
+a tdcall causes a trap-like TD exit, `TDH.VP.ENTER` returns a status with this flag set, for
+example:
+
+- `TDX_HOST_PRIORITY_BUSY_TIMEOUT`, a tdcall kept failing for too long on a lock that the TDX
+  module reserved for the VMM after a failed seamcall, but the VMM did not retry the seamcall,
+  which would take the lock and clear the reservation. See [Host Priority](#host-priority) for
+  details.
+- `TDX_CROSS_TD_TRAP`, a service TD tdcall such as `TDG.SERVTD.RD` failed because of an error
+  related to the target TD.
+
+The VMM supplies the hint in bit 52 of the `RCX` input on the next `TDH.VP.ENTER`, and the TDX
+module copies it into this flag in the tdcall status of the TD. If set, the error is probably not
+recoverable.
+
+---
+
+## Interruptible Seamcalls
+
+Many TDX seamcalls are interruptible, which means they may return before finishing their work and
+expect the VMM to invoke them again so that they continue from where they left off.
+
+Most host-side TDX seamcalls run in **SEAM root mode** with interrupts disabled, including NMI, SMI,
+and INIT. If a seamcall runs a long operation, it may introduce noticeable latency for the host.
+Interruptible seamcalls are designed to mitigate this issue.
+
+The idea is that while executing a seamcall the TDX module periodically checks for pending events,
+such as interrupts. If a pending event is detected, the seamcall may return early, allowing the host
+to handle the event and then resume the seamcall, which continues its work from where it left off.
+
+### Resumable vs Restartable
+
+The TDX module defines two kinds of interruptible seamcalls:
+
+- A **resumable** seamcall saves its intermediate state before returning and continues from the
+  interruption point when invoked again. Resumable seamcalls are designed so that every resumption
+  makes some progress. Most interruptible seamcalls are resumable.
+- A **restartable** seamcall saves no intermediate state and starts from scratch when invoked
+  again. It returns `TDX_INTERRUPTED_RESTARTABLE` and does not guarantee progress. Restartable
+  seamcalls in the current TDX ABI include `TDH.MEM.PAGE.DEMOTE` and `TDH.MEM.PAGE.PROMOTE`.
+
+A seamcall is either resumable or restartable, never both.
+
+### Non-Extension Seamcalls
+
+For example, `TDH.EXPORT.MEM` and `TDH.IMPORT.MEM` export or import up to 512 pages and check for
+pending events after each 4KiB page. This works well because each page is encrypted independently:
+the seamcall can stop and later resume on a page boundary.
+
+Where the intermediate progress is saved varies by seamcall:
+
+- `TDH.EXPORT.MEM` and `TDH.IMPORT.MEM` operate on a migration stream, identified by a stream ID
+  input argument. Each stream has a stream context, a page the VMM donates to the TDX module with
+  `TDH.MIG.STREAM.CREATE` before migration starts. On interruption, the seamcall saves its progress
+  in that stream context and returns the updated GPA list position in `RCX`. To resume, the VMM
+  calls the same seamcall again with that `RCX` value, the other inputs unchanged, and the `RESUME`
+  command in the stream index operand.
+- Other seamcalls report the progress in an output register. For example, `TDH.EXT.MEM.ADD` adds
+  up to 512 pages to the TDX module's internal memory pool, takes a list of pages as input, and on
+  interruption returns the index of the next list entry to process. To resume, the VMM calls the
+  seamcall again with that index.
+
+### Extension Seamcalls
+
+Not all cryptographic work can be split this way. Generating or verifying a signature, or running a
+key exchange, is one long atomic mathematical computation with no natural midpoints for stopping in
+case of an interrupt. Implementing a stop/resume would mean checkpointing the internal state of the
+algorithm itself, which is not an easy task.
+
+TD attestation, live migration, and TDX Connect involve such long atomic cryptographic computations:
+
+- Signing an attestation quote requires a digital signature computation.
+- The migration setup session runs an AKE (Authenticated Key Exchange) based on Diffie-Hellman to
+  derive the migration session keys.
+- TDX Connect establishes SPDM sessions with devices.
+
+Because of this, these tasks are implemented as TDX module extensions: hidden TDs, managed by
+the TDX module and invisible to the VMM, that run in SEAM non-root mode with interrupts enabled.
+A pending event causes a [VM exit](#vm-exit-and-td-exit) at an arbitrary point, same as for any
+other TD, and the TDX module resumes the extension later, the same way it resumes any other TD. This
+way, these extensions get interruptibility for free from the ordinary TD exit and resume mechanism,
+without the cryptographic code itself needing to support it.
+
+Extensions process requests using a pool of virtual threads. A virtual thread here is a TDX
+module concept, not an OS thread: it is one of the hidden TD's own vCPUs, assigned to serve a
+request. A request stays assigned to the virtual thread that started it until it completes, even
+across an interruption: the VMM resumes an interrupted request by calling the same seamcall
+again, and the extension continues on the same virtual thread.
+
+### Concurrency as a Reason to Interrupt
+
+The other reason to interrupt a seamcall is concurrency. For example:
+
+- A seamcall may encounter a busy resource it needs, such as a lock on a SEPT entry. Instead of
+  failing, it returns `TDX_INTERRUPTED_BUSY`.
+- A seamcall may own a resource that a concurrent seamcall needs. To avoid starving that seamcall,
+  it yields the resource and returns `TDX_INTERRUPTED_BUSY`.
+
+### Must the VMM Resume?
+
+When a seamcall exits with an interrupted exit code, the VMM is free to do other things instead of
+immediately resuming it. But can the VMM ignore the interrupted operation and call the same
+seamcall from scratch?
+
+For extension seamcalls, the VMM must not start a new request in place of an interrupted one. The
+backing hidden TD processes each request on a virtual thread, which stays assigned to the
+interrupted request until the VMM resumes it. Otherwise the virtual thread cannot serve any other
+request, effectively leaking a resource. **Note**: an abort operation is also available, letting the
+VMM abort the interrupted request or session instead of resuming it.
+
+For non-extension seamcalls, it depends.
+
+- In the case of plain register-based resumption, such as `TDH.EXT.MEM.ADD`, all the state is held
+  in registers, and nothing is retained by the TDX module. The VMM can simply start over with new
+  input operands.
+- In other cases, the TDX module itself retains progress across calls, and the VMM must resume
+  rather than start fresh to make use of it. The memory export/import seamcalls are one example:
+  `TDH.EXPORT.MEM` and `TDH.IMPORT.MEM` take a stream ID as input and operate on that stream, so
+  this is a per-stream context, and starting fresh on an interrupted stream fails with
+  `TDX_INVALID_RESUMPTION`.
+
+### Interrupted Exit Codes
+
+All interrupted exit codes start with `TDX_INTERRUPTED_`. They have the `ERROR` bit set, but they do
+not report a failure. They report that the operation is incomplete and should be resumed. The one
+exception is `TDX_INTERRUPTED_RESTARTABLE`, which asks for a restart rather than a resumption.
+
+The current TDX ABI defines the following interrupted exit codes:
+
+- `TDX_INTERRUPTED_RESUMABLE`: a pending event was detected.
+- `TDX_INTERRUPTED_RESTARTABLE`: the same, but the seamcall is restartable rather than resumable.
+- `TDX_INTERRUPTED_BUSY`: a required TDX module resource was busy.
+- `TDX_INTERRUPTED_LIST_FULL`: the output GPA list-of-lists ran out of free entries.
+- `TDX_INTERRUPTED_LIST_END`: the VMM asked to process only part of an input GPA list. This code is
+  interesting because it reports a deliberate VMM request, not an interrupt or contention.
+- `TDX_INTERRUPTED_BLOCKED_RANGE`: a blocked SEPT entry was found during a scan.
+- `TDX_INTERRUPTED_PAMT`: with dynamic PAMT, the operation needs more PAMT pages. The VMM has to
+  add them with `TDH.PHYMEM.PAMT.ADD` and resume.
+
+Each of them is a separate [base value](#status-codes), not one base value with a different operand
+ID. Most leave the lower half 0. `TDX_INTERRUPTED_BUSY` and `TDX_INTERRUPTED_PAMT` may use the
+lower half for additional details.
+
+---
+
+## Host Priority
+
+Host priority is a TDX module mechanism that gives the host VMM precedence over the TD when
+both compete for the same resource. It is not specific to live migration.
+
+### Problem Statement
+
+Some TDX module resources can be accessed from both sides: by the host through seamcalls, and by
+the TD through tdcalls (`TDCALL` leaf functions). Examples are the
+[TDR](https://github.com/dedekind/dedekind-share/blob/master/misc/intel-cpu/tdx-structs.md#tdr),
+[TDCS](https://github.com/dedekind/dedekind-share/blob/master/misc/intel-cpu/tdx-structs.md#tdcs),
+[TDVPS](https://github.com/dedekind/dedekind-share/blob/master/misc/intel-cpu/tdx-structs.md#tdvps),
+and SEPT entries. Every such resource has a corresponding lock inside the TDX module.
+
+A seamcall or a tdcall that needs a shared resource tries to acquire the corresponding lock. If the
+lock is busy, the TDX module does not spin waiting for it. It gives up, returns a busy status code,
+and the caller is expected to retry.
+
+When the VMM and TDs keep retrying on the same lock, the VMM may win only rarely, or not at all. A
+TD has many vCPUs, and a platform runs many TDs, so the same lock may be hit from many CPUs while
+the VMM retries from one. This can stall VMM operations such as memory management or migration, and
+opens the door to a denial of service attack against the VMM.
+
+This contention has to be resolved in favor of the VMM, which can already deny service to a TD by
+not scheduling its vCPUs.
+
+### Solution
+
+The TDX module adds a "host priority" (`HOST_PRIORITY` or HP) bit to most locks that the VMM and
+TDs may compete for. These rules govern it:
+
+- When the VMM fails to take the lock (via a seamcall), the TDX module sets `HOST_PRIORITY` and
+  returns `TDX_OPERAND_BUSY`. The [operand ID](#status-codes) in the lower half may include the ID
+  of the lock that could not be acquired.
+- When the VMM takes the lock, the TDX module clears `HOST_PRIORITY`.
+- The TD (via a tdcall) fails to take the lock while `HOST_PRIORITY` is 1, gets `TDX_OPERAND_BUSY`
+  as well, and is expected to retry.
+
+So one failed VMM attempt closes the lock to the TD, and the VMM can take it as soon as the current
+holder releases it. The TDX module makes sure this does not take long: a TD flow that holds such a
+lock has a bounded duration, and normal completion of the flow releases the lock.
+
+### Timeout Mechanism
+
+Because only a successful seamcall clears `HOST_PRIORITY`, the VMM should retry on busy status
+codes. Otherwise the TD cannot make progress because the lock remains unavailable to it.
+
+The TDX module has a per vCPU timeout mechanism for detecting the case when the VMM does not clear
+`HOST_PRIORITY` within `TDCS.HP_LOCK_TIMEOUT`, which defaults to 1 second and is configurable from
+10 ms to 100 seconds with `TDH.MNG.WR`. The timeout measures how long the vCPU has been invoking
+tdcalls that keep failing because `HOST_PRIORITY` is 1. Any tdcall that completes with a different
+status restarts the measurement.
+
+The TDX module checks the timeout only when such a tdcall fails. The first failure after the timeout
+expires causes a trap-like TD exit. The VMM sees `TDH.VP.ENTER` return
+`TDX_HOST_PRIORITY_BUSY_TIMEOUT`, which tells the VMM that it did not clear `HOST_PRIORITY` in
+time. The VMM should then retry the seamcall that previously failed until it succeeds, and re-enter
+the TD with `TDH.VP.ENTER`.
+
+The TD exit is trap-like, which means the tdcall counts as executed. The TD resumes at the next
+instruction and reads the tdcall completion status, rather than re-executing the tdcall. This gives
+the VMM a way to tell the TD whether retrying is worth it. The VMM supplies the hint in bit 52
+(`HOST_RECOVERABILITY_HINT`) of the `RCX` input on the next entry, and the TDX module reflects it
+into the `HOST_RECOVERABILITY_HINT` flag (bit 60) of the TD `RAX`:
+
+- 0: the VMM corrected the condition, so the TD may retry the tdcall.
+- 1: the error is probably not recoverable.
+
+Setting that flag turns the `TDX_OPERAND_BUSY` base value (`0x8000020000000000`) into
+`TDX_OPERAND_BUSY_HOST_RECOVERABILITY_HINT` (`0x9000020000000000`).
+
+### Status Codes Summary
+
+The TDX ABI defines `TDX_OPERAND_BUSY_HOST_PRIORITY` for the host priority busy case, but in the
+current TDX module implementation neither side observes it. The module uses it internally to drive
+the timeout, and converts it to `TDX_OPERAND_BUSY` before returning to the TD, for compatibility
+with older TDs. The remaining codes are:
+
+On the TD side:
+
+- `TDX_OPERAND_BUSY` (`0x8000020000000000`): the lock was busy, either because another flow holds
+  it or because `HOST_PRIORITY` is set. The status does not distinguish the two.
+- `TDX_OPERAND_BUSY_HOST_RECOVERABILITY_HINT` (`0x9000020000000000`): the `TDX_OPERAND_BUSY` base
+  value with the `HOST_RECOVERABILITY_HINT` flag set.
+
+On the VMM side:
+
+- `TDX_OPERAND_BUSY` (`0x8000020000000000`): the lock was busy, and the TDX module has set
+  `HOST_PRIORITY` if this was a host priority lock.
+- `TDX_HOST_PRIORITY_BUSY_TIMEOUT` (`0x9000020500000000`): a `TDH.VP.ENTER` status telling the VMM
+  that the TD cannot make progress because the host did not clear `HOST_PRIORITY` in time.
+- `SEPT_ENTRY_BUSY_HOST_PRIORITY` (3) and `TD_PAGE_BUSY_HOST_PRIORITY` (12): not base values, but
+  per-page `STATUS` values in the GPA list of the migration seamcalls. `TDH.EXPORT.MEM` reports the
+  first one, and `TDH.IMPORT.MEM` reports either.
+
+### Is Retry Mandatory?
+
+On the TD side, retrying is up to the TD. Nothing in the TDX module depends on it.
+
+On the VMM side, one could conclude from the above that retrying is important only when the busy
+status is due to host priority, and optional otherwise. That is not the case. The TDX module
+expects the VMM to always retry whenever a busy status is returned. There is no way for VMM to tell
+if the busy status was due to host priority or not. So effectively, it is mandatory for the VMM to
+retry whenever it encounters a busy status.
 
 ---
 
@@ -261,7 +597,7 @@ the following conditions.
   by whoever owns the page tables (VMM for shared memory, TDX module for private memory).
 - `VE_INFO.VALID` is 0, which indicates that the VE_INFO area is empty, as opposed to holding
   information from a previous `#VE` that the guest has not cleared, and therefore supposedly has not
-  handled. Refer to [VE_INFO](#ve_info) for details.
+  handled. Refer to [VE_INFO](tdx-structs.md#ve_info) for details.
 
 A TD has two EPT trees: the Secure EPT for private GPAs and the Shared EPT for shared GPAs, and the
 `SHARED` bit of the GPA selects between them. Both are ordinary EPTs as far as the CPU is concerned,

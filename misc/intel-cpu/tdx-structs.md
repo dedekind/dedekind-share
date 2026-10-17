@@ -50,6 +50,8 @@ structures, intended for reference from my other documents.
   - [EPTP](#eptp)
     - [EPTP Switching](#eptp-switching)
   - [TDVPS](#tdvps)
+  - [VE\_INFO](#ve_info)
+    - [TDX-Specific Fields](#tdx-specific-fields)
   - [TD\_CTLS](#td_ctls)
     - [TD\_CTLS Bits](#td_ctls-bits)
   - [FEATURE\_PARAVIRT\_CTRL](#feature_paravirt_ctrl)
@@ -580,6 +582,72 @@ the `TDH.VP.ADDCX` seamcall adds the TDCX pages. `TDVPS_BASE_SIZE`, readable wit
 The VMM needs to know the HPA of the TDVPR page, because it is used in various per-vCPU seamcalls,
 such as `TDH.VP.RD` and `TDH.VP.WR`, to identify the vCPU. But the VMM does not need to know the
 HPAs of TDCX pages.
+
+---
+
+## VE_INFO
+
+The **VE_INFO** (virtualization exception information area) is a memory area that carries the
+details of a [#VE](tdx-misc.md#ve). It is per vCPU, it is allocated when the vCPU is created, and
+the VMCS of the vCPU holds a pointer to it. The first 34 bytes are architectural, and whoever raises
+the `#VE` fills them in: the CPU for an EPT violation, or the TDX module when it injects a `#VE`
+itself.
+
+Intel SDM requires the VE_INFO address to be 4KiB-aligned, but does not require the area to be of
+any certain size.
+
+- The TDX module gives it a full 4KiB page inside the [TDVPS](#tdvps), and uses the space beyond the
+  first 34 bytes for the [TDX-specific fields](#tdx-specific-fields).
+- Linux KVM also allocates a 4KiB page for VMX guests, but it defines only the architectural fields
+  and never uses the rest.
+
+The fields in the architectural part of the VE_INFO area hold the values that would have gone into
+the VMCS if a VM exit had happened instead of the `#VE`.
+
+| Offset | Field                | Meaning                                                        |
+|--------|----------------------|----------------------------------------------------------------|
+| 0      | `EXIT_REASON`        | The VM exit reason, e.g., EPT violation (48) or MSR read (31). |
+| 4      | `VALID`              | 0 means VE_INFO is free, 0xFFFFFFFF means it holds a `#VE`.    |
+| 8      | `EXIT_QUALIFICATION` | Exit qualification value.                                      |
+| 16     | `GLA`                | Guest linear address.                                          |
+| 24     | `GPA`                | Guest physical address.                                        |
+| 32     | `EPTP_INDEX`         | Current EPTP index VM-execution control.                       |
+
+`EXIT_REASON` tells what caused the `#VE`. In case of an EPT violation the CPU raises the
+`#VE` and writes 48, which is the only value the CPU ever writes. But a `#VE` can also be
+injected by software, for example the TDX module injects one when it virtualizes an operation on
+behalf of the TD, and then the value is the reason of that operation, such as MSR read (31) or
+`CPUID` (10).
+
+`VALID` marks the VE_INFO area as "occupied". Whoever raises the `#VE` sets it to 0xFFFFFFFF, and
+the guest writes 0 back when it is done. A VMX guest does it directly, a TD calls
+`TDG.VP.VEINFO.GET`, which hands over VE_INFO and clears `VALID`.
+
+`EXIT_QUALIFICATION` carries extra details, and its meaning depends on `EXIT_REASON`. For an EPT
+violation it includes whether the access was a read, a write, or an instruction fetch, and several
+other bits.
+
+`GLA` is the address the guest used, before paging translated it (see
+[GLA and GVA](x86-misc.md#gla-and-gva)).
+
+`EPTP_INDEX` identifies which EPTP in the list was active, so the handler knows which EPT the
+violation happened in. Not relevant for TDX guests. See [EPTP](#eptp) for details.
+
+### TDX-Specific Fields
+
+In addition to the architectural 34 bytes, the TDX module maintains its own fields in the VE_INFO
+area. The TD reads both the architectural and the TDX-specific fields with the same
+`TDG.VP.VEINFO.GET` tdcall. Here are some of the TDX-specific fields.
+
+- `INSTRUCTION_LENGTH` is the length of the instruction that caused the `#VE`. The handler adds it
+  to `RIP` to resume past the instruction it just emulated.
+- `INSTRUCTION_INFORMATION` and `EXTENDED_INSTRUCTION_INFORMATION` describe the operands, such as
+  the registers and the address size, so that the `#VE` handler could emulate the operation.
+- The `CATEGORY` byte, which tells the TD what kind of event it is looking at. See
+  [#VE Categories](tdx-misc.md#ve-categories) for the values and their meaning.
+
+Support for `CATEGORY` is enumerated by `TDX_FEATURES0.VE_REDUCTION` (bit 30), and the TD gets it by
+calling `TDG.VP.VEINFO.GET` with version 1 or higher.
 
 ---
 
