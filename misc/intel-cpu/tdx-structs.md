@@ -28,6 +28,7 @@ structures, intended for reference from my other documents.
 - [TDX Module Notes](#tdx-module-notes)
   - [Table of Contents](#table-of-contents)
   - [TDCS](#tdcs)
+  - [TDR](#tdr)
   - [TD\_PARAMS](#td_params)
   - [ATTRIBUTES](#attributes)
     - [ATTRIBUTES Groups](#attributes-groups)
@@ -87,6 +88,30 @@ own page tables. The VMM accesses selected TDCS fields with the `TDH.MNG.RD` and
 seamcalls. The TD accesses its permitted TDCS fields with the `TDG.VM.RD` and `TDG.VM.WR` tdcalls.
 
 TDCS holds TD-wide runtime state and configuration. Per-vCPU state is held separately in the TDVPS.
+
+---
+
+## TDR
+
+The **TDR** (Trust Domain Root) is a top-level TDX module data structure. It is the root of a tree
+of TD control structures. It points to the [TDCS](#tdcs) pages, which in turn contain the SEPT root
+page pointer.
+
+**TD handle** is the HPA of the TDR page of the TD. Many seamcalls operate on a specific TD and take
+the TD handle as input.
+
+The TDR contents and layout are non-architectural and subject to change. It is an internal
+TDX module data structure. For the VMM, the role of the TDR is to identify the TD in seamcalls.
+
+The TDR is stored in one 4KiB TDR page. The VMM allocates this page and passes its HPA to
+`TDH.MNG.CREATE`. The TDX module then takes ownership of the page and initializes the TDR in it.
+
+The TDR page belongs to the TDX module, not the VMM or the TD. It is not mapped into the GPA
+space of the TD. It is encrypted using the TDX global private HKID, so neither the VMM nor
+the TD can directly access its contents.
+
+The TDR page is the last page that the VMM reclaims during TD teardown, after all other TD pages
+have been reclaimed.
 
 ---
 
