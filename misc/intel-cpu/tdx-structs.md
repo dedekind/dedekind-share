@@ -29,6 +29,7 @@ structures, intended for reference from my other documents.
   - [Table of Contents](#table-of-contents)
   - [TDCS](#tdcs)
   - [TDR](#tdr)
+  - [Metadata Fields](#metadata-fields)
   - [TD\_PARAMS](#td_params)
   - [ATTRIBUTES](#attributes)
     - [ATTRIBUTES Groups](#attributes-groups)
@@ -113,6 +114,33 @@ the TD can directly access its contents.
 
 The TDR page is the last page that the VMM reclaims during TD teardown, after all other TD pages
 have been reclaimed.
+
+---
+
+## Metadata Fields
+
+A **metadata field** consists of a `FIELD_ID` and its value. The TDX ABI defines the meaning, scope,
+value format, and access rules for each field.
+
+For example, [`TD_CTLS`](#td_ctls) is a TD-scope metadata field.
+
+- **Field ID**: `0x9110000300000017`.
+- **Meaning**: Bitmap of TD controls that the TD may modify at run time.
+- **Scope**: TD.
+- **Format**: 64-bit bitmap.
+- **TD access**: Read/write.
+- **VMM access**: None in production mode, read-only in debug mode.
+
+Examples of seamcalls and tdcalls for accessing metadata fields:
+
+| Scope  | Seamcall read | Seamcall write | Tdcall read  | Tdcall write |
+|--------|---------------|----------------|--------------|--------------|
+| Global | `TDH.SYS.RD`  | `TDH.SYS.WR`   | `TDG.SYS.RD` | N/A          |
+| TD     | `TDH.MNG.RD`  | `TDH.MNG.WR`   | `TDG.VM.RD`  | `TDG.VM.WR`  |
+| vCPU   | `TDH.VP.RD`   | `TDH.VP.WR`    | `TDG.VP.RD`  | `TDG.VP.WR`  |
+
+Other metadata fields described in this document include [`ATTRIBUTES`](#attributes),
+[`XFAM`](#xfam), and [`TDX_FEATURES0`](#tdx_features0).
 
 ---
 
