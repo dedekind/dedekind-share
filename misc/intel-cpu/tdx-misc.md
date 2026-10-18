@@ -31,14 +31,16 @@ concepts, intended for reference from my other documents.
   - [Host State Across TDH.VP.ENTER](#host-state-across-tdhvpenter)
     - [SEAM Transition Detail](#seam-transition-detail)
   - [Status Codes](#status-codes)
+    - [TDX\_OPERAND\_BUSY](#tdx_operand_busy)
     - [Recoverability Hints](#recoverability-hints)
   - [Interruptible Seamcalls](#interruptible-seamcalls)
     - [Resumable vs Restartable](#resumable-vs-restartable)
+    - [Interruptible Exit Codes](#interruptible-exit-codes)
     - [Non-Extension Seamcalls](#non-extension-seamcalls)
     - [Extension Seamcalls](#extension-seamcalls)
     - [Concurrency as a Reason to Interrupt](#concurrency-as-a-reason-to-interrupt)
+    - [TDX\_OPERAND\_BUSY vs TDX\_INTERRUPTED\_BUSY](#tdx_operand_busy-vs-tdx_interrupted_busy)
     - [Must the VMM Resume?](#must-the-vmm-resume)
-    - [Interrupted Exit Codes](#interrupted-exit-codes)
   - [Host Priority](#host-priority)
     - [Problem Statement](#problem-statement)
     - [Solution](#solution)
@@ -209,6 +211,26 @@ Other base values use the lower half differently:
 | `TDX_EVENT_FILTER_INVALID`             | Position of the bad event in the input list. |
 | `TDX_INVALID_PKG_ID`                   | Package ID.                                  |
 
+### TDX_OPERAND_BUSY
+
+In most cases `TDX_OPERAND_BUSY` reports that a resource the seamcall or tdcall needs is locked by a
+concurrent operation. For example:
+
+- `TDX_OPERAND_BUSY(SEPT_ENTRY)` indicates that the SEPT entry the seamcall or tdcall needs is
+  locked.
+- `TDX_OPERAND_BUSY(TDR)` indicates that the TDR the seamcall or tdcall needs is locked.
+
+`TDX_OPERAND_BUSY` does not always mean that a lock is held. For example:
+
+- [TDX extension seamcalls](#extension-seamcalls), such as `TDH.MIG.SETUP`, return
+  `TDX_OPERAND_BUSY(VIRTUAL_THREAD_POOL)` when there is no free thread available.
+- A seamcall may try to update a value using the `LOCK CMPXCHG` instruction but lose the race (read
+  value, compute new, attempt to write but notice it changed in the meantime). For example,
+  `TDH.MNG.WR` updates some [metadata fields](tdx-structs.md#metadata-fields) using this technique
+  and may return `TDX_OPERAND_BUSY(METADATA_FIELD)` when the race is lost.
+
+This return status is recoverable and indicates that the operation can be retried.
+
 ### Recoverability Hints
 
 `NON_RECOVERABLE` is a hint. It means that an error is probably not recoverable, or, in the
@@ -236,66 +258,89 @@ recoverable.
 Many TDX seamcalls are interruptible, which means they may return before finishing their work and
 expect the VMM to invoke them again so that they continue from where they left off.
 
-Most host-side TDX seamcalls run in **SEAM root mode** with interrupts disabled, including NMI, SMI,
-and INIT. If a seamcall runs a long operation, it may introduce noticeable latency for the host.
-Interruptible seamcalls are designed to mitigate this issue.
-
-The idea is that while executing a seamcall the TDX module periodically checks for pending events,
-such as interrupts. If a pending event is detected, the seamcall may return early, allowing the host
-to handle the event and then resume the seamcall, which continues its work from where it left off.
-
 ### Resumable vs Restartable
 
 The TDX module defines two kinds of interruptible seamcalls:
 
-- A **resumable** seamcall saves its intermediate state before returning and continues from the
-  interruption point when invoked again. Resumable seamcalls are designed so that every resumption
-  makes some progress. Most interruptible seamcalls are resumable.
+- A **resumable** seamcall saves its intermediate state before returning, so the VMM continues it
+  from the interruption point when invoked again. Resumable seamcalls are designed so that every
+  resumption makes some progress, and most interruptible seamcalls are resumable.
 - A **restartable** seamcall saves no intermediate state and starts from scratch when invoked
-  again. It returns `TDX_INTERRUPTED_RESTARTABLE` and does not guarantee progress. Restartable
-  seamcalls in the current TDX ABI include `TDH.MEM.PAGE.DEMOTE` and `TDH.MEM.PAGE.PROMOTE`.
+  again. It does not guarantee progress. There are only a few restartable seamcalls, for example
+  `TDH.MEM.PAGE.DEMOTE` and `TDH.MEM.PAGE.PROMOTE`.
 
 A seamcall is either resumable or restartable, never both.
 
+### Interruptible Exit Codes
+
+All interruptible exit codes start with `TDX_INTERRUPTED_`. They have the `ERROR` bit set (see
+[Status Codes](#status-codes)), but they do not report a failure.
+
+Here are some of the resumable exit codes:
+
+- `TDX_INTERRUPTED_RESUMABLE`: a pending event was detected.
+- `TDX_INTERRUPTED_BUSY`: a required TDX module resource was busy.
+- `TDX_INTERRUPTED_LIST_FULL`: the output GPA list-of-lists ran out of free entries.
+- `TDX_INTERRUPTED_LIST_END`: the VMM asked to process only part of an input GPA list. This code is
+  interesting because it reports a deliberate VMM request, not an interrupt or contention.
+- `TDX_INTERRUPTED_BLOCKED_RANGE`: a blocked SEPT entry was found during a scan.
+- `TDX_INTERRUPTED_PAMT`: with dynamic PAMT, the operation needs more PAMT pages. The VMM has to
+  add them with `TDH.PHYMEM.PAMT.ADD` and resume.
+
+There is only one restartable exit code, `TDX_INTERRUPTED_RESTARTABLE`. All other interruptible
+exit codes indicate a resumable seamcall, each for a different reason.
+
+Notice that these exit codes use different [base values](#status-codes), instead of sharing one
+base value with different operand IDs, the way `TDX_OPERAND_BUSY` does.
+
 ### Non-Extension Seamcalls
+
+While the VMM runs a seamcall other than `TDH.VP.ENTER`, the TDX module runs in **SEAM
+root mode** and does not recognize external events such as interrupts, NMI, SMI, and INIT. A long
+seamcall may therefore delay the host's response to an event. Interruptible seamcalls limit this
+delay by periodically checking for pending events. If one is detected, the seamcall returns early
+with an interruptible exit code, allowing the host to handle the event and then resume the seamcall
+from where it left off.
 
 For example, `TDH.EXPORT.MEM` and `TDH.IMPORT.MEM` export or import up to 512 pages and check for
 pending events after each 4KiB page. This works well because each page is encrypted independently:
 the seamcall can stop and later resume on a page boundary.
 
-Where the intermediate progress is saved varies by seamcall:
+Interrupted seamcalls save their intermediate progress so they can resume later. Here are some
+examples of where that progress is saved:
 
+- For some seamcalls, the progress is saved in the seamcall's output registers, and the VMM just
+  has to pass them back as input when it resumes the seamcall. For example, `TDH.EXT.MEM.ADD`
+  takes a list of up to 512 pages as input, and on interruption returns the index of the next list
+  entry to process. To resume, the VMM calls it again with that index.
 - `TDH.EXPORT.MEM` and `TDH.IMPORT.MEM` operate on a migration stream, identified by a stream ID
   input argument. Each stream has a stream context, a page the VMM donates to the TDX module with
   `TDH.MIG.STREAM.CREATE` before migration starts. On interruption, the seamcall saves its progress
   in that stream context and returns the updated GPA list position in `RCX`. To resume, the VMM
   calls the same seamcall again with that `RCX` value, the other inputs unchanged, and the `RESUME`
   command in the stream index operand.
-- Other seamcalls report the progress in an output register. For example, `TDH.EXT.MEM.ADD` adds
-  up to 512 pages to the TDX module's internal memory pool, takes a list of pages as input, and on
-  interruption returns the index of the next list entry to process. To resume, the VMM calls the
-  seamcall again with that index.
 
 ### Extension Seamcalls
 
-Not all cryptographic work can be split this way. Generating or verifying a signature, or running a
-key exchange, is one long atomic mathematical computation with no natural midpoints for stopping in
-case of an interrupt. Implementing a stop/resume would mean checkpointing the internal state of the
-algorithm itself, which is not an easy task.
+Some cryptographic operations do not have natural checkpoints where their progress can be saved
+and restored easily. A signature calculation or key exchange may run as one long computation, and
+saving its internal state for later resumption can be difficult.
 
-TD attestation, live migration, and TDX Connect involve such long atomic cryptographic computations:
+TD attestation, live migration, and TDX Connect involve cryptographic operations such as:
 
 - Signing an attestation quote requires a digital signature computation.
 - The migration setup session runs an AKE (Authenticated Key Exchange) based on Diffie-Hellman to
   derive the migration session keys.
 - TDX Connect establishes SPDM sessions with devices.
 
-Because of this, these tasks are implemented as TDX module extensions: hidden TDs, managed by
-the TDX module and invisible to the VMM, that run in SEAM non-root mode with interrupts enabled.
-A pending event causes a [VM exit](#vm-exit-and-td-exit) at an arbitrary point, same as for any
-other TD, and the TDX module resumes the extension later, the same way it resumes any other TD. This
-way, these extensions get interruptibility for free from the ordinary TD exit and resume mechanism,
-without the cryptographic code itself needing to support it.
+Operations like these run in TDX module extensions. In the current design, these extensions are
+hidden TDs managed by the TDX module. They run in SEAM non-root mode and are invisible to the VMM. A
+pending event can cause a [VM exit](#vm-exit-and-td-exit) from a hidden TD to the TDX module. The
+hidden TD resumes at the interrupted instruction after the event is handled. The cryptographic
+code continues without saving and restoring its own internal state.
+
+**Note**: TDX module specs do not guarantee that future designs will continue using hidden TDs for
+extensions. This is an internal TDX module implementation detail.
 
 Extensions process requests using a pool of virtual threads. A virtual thread here is a TDX
 module concept, not an OS thread: it is one of the hidden TD's own vCPUs, assigned to serve a
@@ -305,57 +350,51 @@ again, and the extension continues on the same virtual thread.
 
 ### Concurrency as a Reason to Interrupt
 
-The other reason to interrupt a seamcall is concurrency. For example:
+The primary reason a seamcall returns an interruptible exit code is a pending interrupt. But there
+may also be other reasons. Here are a couple of examples.
 
 - A seamcall may encounter a busy resource it needs, such as a lock on a SEPT entry. Instead of
   failing, it returns `TDX_INTERRUPTED_BUSY`.
 - A seamcall may own a resource that a concurrent seamcall needs. To avoid starving that seamcall,
   it yields the resource and returns `TDX_INTERRUPTED_BUSY`.
 
+### TDX_OPERAND_BUSY vs TDX_INTERRUPTED_BUSY
+
+Both codes report contention, but they ask the VMM to do different things:
+
+- [`TDX_OPERAND_BUSY`](#tdx_operand_busy) is an error. The seamcall saved no continuation state, so
+  the VMM repeats the invocation.
+- `TDX_INTERRUPTED_BUSY` is not an error. The seamcall saved its state, so it is resumable, and the
+  VMM resumes it instead.
+
 ### Must the VMM Resume?
 
 When a seamcall exits with an interrupted exit code, the VMM is free to do other things instead of
 immediately resuming it. But can the VMM ignore the interrupted operation and call the same
-seamcall from scratch?
+seamcall from scratch instead?
 
-For extension seamcalls, the VMM must not start a new request in place of an interrupted one. The
-backing hidden TD processes each request on a virtual thread, which stays assigned to the
-interrupted request until the VMM resumes it. Otherwise the virtual thread cannot serve any other
-request, effectively leaking a resource. **Note**: an abort operation is also available, letting the
-VMM abort the interrupted request or session instead of resuming it.
+For restartable seamcalls, this question does not apply: they keep no state, so calling them again
+from scratch is correct behavior by design, not just an option.
 
-For non-extension seamcalls, it depends.
+For resumable seamcalls, it depends on the kind of seamcall.
 
-- In the case of plain register-based resumption, such as `TDH.EXT.MEM.ADD`, all the state is held
-  in registers, and nothing is retained by the TDX module. The VMM can simply start over with new
-  input operands.
-- In other cases, the TDX module itself retains progress across calls, and the VMM must resume
-  rather than start fresh to make use of it. The memory export/import seamcalls are one example:
-  `TDH.EXPORT.MEM` and `TDH.IMPORT.MEM` take a stream ID as input and operate on that stream, so
-  this is a per-stream context, and starting fresh on an interrupted stream fails with
-  `TDX_INVALID_RESUMPTION`.
-
-### Interrupted Exit Codes
-
-All interrupted exit codes start with `TDX_INTERRUPTED_`. They have the `ERROR` bit set, but they do
-not report a failure. They report that the operation is incomplete and should be resumed. The one
-exception is `TDX_INTERRUPTED_RESTARTABLE`, which asks for a restart rather than a resumption.
-
-The current TDX ABI defines the following interrupted exit codes:
-
-- `TDX_INTERRUPTED_RESUMABLE`: a pending event was detected.
-- `TDX_INTERRUPTED_RESTARTABLE`: the same, but the seamcall is restartable rather than resumable.
-- `TDX_INTERRUPTED_BUSY`: a required TDX module resource was busy.
-- `TDX_INTERRUPTED_LIST_FULL`: the output GPA list-of-lists ran out of free entries.
-- `TDX_INTERRUPTED_LIST_END`: the VMM asked to process only part of an input GPA list. This code is
-  interesting because it reports a deliberate VMM request, not an interrupt or contention.
-- `TDX_INTERRUPTED_BLOCKED_RANGE`: a blocked SEPT entry was found during a scan.
-- `TDX_INTERRUPTED_PAMT`: with dynamic PAMT, the operation needs more PAMT pages. The VMM has to
-  add them with `TDH.PHYMEM.PAMT.ADD` and resume.
-
-Each of them is a separate [base value](#status-codes), not one base value with a different operand
-ID. Most leave the lower half 0. `TDX_INTERRUPTED_BUSY` and `TDX_INTERRUPTED_PAMT` may use the
-lower half for additional details.
+- For extension seamcalls, the VMM must not start a new request in place of an interrupted one. The
+  backing hidden TD processes each request on a virtual thread, which stays assigned to the
+  interrupted request until the VMM resumes it. Otherwise the virtual thread cannot serve any other
+  request, effectively leaking a resource.
+  - However, some extension seamcalls have an abort seamcall, such as `TDH.MIG.SETUP.ABORT` for
+    `TDH.MIG.SETUP`. The VMM can use it to abort the Migration Setup session instead of resuming
+    `TDH.MIG.SETUP`.
+- For non-extension seamcalls, it depends on where the progress is kept.
+  - `TDH.EXT.MEM.ADD` returns the next list-entry index in `RCX`. It stores no continuation state
+    for the list in memory owned by the TDX module, so the module does not tie a later call to the
+    interrupted list. A later call can use a different list. Pages added before the interruption
+    remain added.
+  - In other cases, the TDX module itself retains progress across calls, and the VMM must resume
+    rather than start fresh to make use of it. The memory export/import seamcalls are one example:
+    `TDH.EXPORT.MEM` and `TDH.IMPORT.MEM` take a stream ID as input and operate on that stream, so
+    this is a per-stream context, and starting fresh on an interrupted stream fails with
+    `TDX_INVALID_RESUMPTION`.
 
 ---
 
@@ -366,24 +405,29 @@ both compete for the same resource. It is not specific to live migration.
 
 ### Problem Statement
 
-Some TDX module resources can be accessed from both sides: by the host through seamcalls, and by
-the TD through tdcalls (`TDCALL` leaf functions). Examples are the
-[TDR](https://github.com/dedekind/dedekind-share/blob/master/misc/intel-cpu/tdx-structs.md#tdr),
+Seamcalls and tdcalls lock the shared resources they operate on, such as
+the [TDR](https://github.com/dedekind/dedekind-share/blob/master/misc/intel-cpu/tdx-structs.md#tdr),
 [TDCS](https://github.com/dedekind/dedekind-share/blob/master/misc/intel-cpu/tdx-structs.md#tdcs),
 [TDVPS](https://github.com/dedekind/dedekind-share/blob/master/misc/intel-cpu/tdx-structs.md#tdvps),
-and SEPT entries. Every such resource has a corresponding lock inside the TDX module.
+and SEPT entries. For example:
 
-A seamcall or a tdcall that needs a shared resource tries to acquire the corresponding lock. If the
-lock is busy, the TDX module does not spin waiting for it. It gives up, returns a busy status code,
-and the caller is expected to retry.
+- TD scope seamcalls, such as `TDH.MNG.RD`, lock the TDR and TDCS of the TD they operate on.
+- vCPU scope seamcalls, such as `TDH.VP.ENTER`, lock TDR and TDCS too, but also can lock TDVPS.
+- Tdcalls, such as `TDG.VM.RD`, lock the same shared resources as the seamcalls.
 
-When the VMM and TDs keep retrying on the same lock, the VMM may win only rarely, or not at all. A
-TD has many vCPUs, and a platform runs many TDs, so the same lock may be hit from many CPUs while
-the VMM retries from one. This can stall VMM operations such as memory management or migration, and
-opens the door to a denial of service attack against the VMM.
+If the lock is busy, the TDX module does not spin waiting for it. It gives up, returns
+`TDX_OPERAND_BUSY` (see [Status Codes](#status-codes)), and the caller is expected to retry.
 
-This contention has to be resolved in favor of the VMM, which can already deny service to a TD by
-not scheduling its vCPUs.
+The same locks can be taken from both sides:
+
+- by the host through a seamcall
+- by the TD through a tdcall
+
+When the TD and VMM compete for the same lock simultaneously, it is conceivable that the TD wins
+most of the time, and VMM keeps retrying and does not make progress. This potentially leads to TD
+attacking VMM with a denial of service.
+
+Therefore, the contention has to be resolved in favor of the VMM.
 
 ### Solution
 
