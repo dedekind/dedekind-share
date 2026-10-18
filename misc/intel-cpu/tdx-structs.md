@@ -56,6 +56,7 @@ structures, intended for reference from my other documents.
     - [TD\_CTLS Bits](#td_ctls-bits)
   - [FEATURE\_PARAVIRT\_CTRL](#feature_paravirt_ctrl)
   - [TDX\_FEATURES0](#tdx_features0)
+  - [TDX\_FEATURES1](#tdx_features1)
 
 ---
 
@@ -740,6 +741,9 @@ The controlled features include `CORE_CAPABILITIES`, `MCA`, `MTRR`, `PCONFIG`, `
 `TDX_FEATURES0` is a 64-bit global metadata field that reports platform capabilities and features
 supported by the running TDX module. The TDX module sets it at initialization time.
 
+Here are some of the `TDX_FEATURES0` fields defined by the TDX module ABI. The list is not
+exhaustive.
+
 | Bit | Name                       | When Set                                                 |
 |-----|----------------------------|----------------------------------------------------------|
 | 0   | `TD_MIGRATION`             | Permits TD migration seamcalls and tdcalls.              |
@@ -763,3 +767,21 @@ seamcall. But it cannot be modified by either the VMM or the TD.
 `TDX_FEATURES0` influences [ATTRIBUTES](#attributes), [XFAM](#xfam) and
 [CONFIG_FLAGS](#config_flags), but indirectly. It shapes the contents of their `*_FIXED0`/`*_FIXED1`
 fields (e.g., `XFAM_FIXED0`), which is what decides the allowed bit combinations.
+
+---
+
+## TDX_FEATURES1
+
+`TDX_FEATURES1` is a 64-bit global metadata field that reports platform capabilities and features
+supported by the running TDX module, similar to [TDX_FEATURES0](#tdx_features0).
+
+`TDX_FEATURES1` is valid only if `TDX_FEATURES0.TDX_FEATURES1_VALID` (bit 63) is set.
+
+Here are some of the `TDX_FEATURES1` fields defined by the TDX module ABI. The list is not
+exhaustive.
+
+| Bit | Name                         | When Set                                               |
+|-----|------------------------------|--------------------------------------------------------|
+| 0   | `MEM_SCAN_ENHANCEMENTS1`     | `TDH.MEM.SCAN.COMP` reports GPA details on errors.     |
+| 2   | `PREUPDATE`                  | Permits calling `TDH.SYS.PREUPDATE`.                   |
+| 4   | `TD_MIGRATION_ENHANCEMENTS1` | Multiple enhancements for TD live migration.           |
