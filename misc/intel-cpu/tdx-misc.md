@@ -64,6 +64,8 @@ concepts, intended for reference from my other documents.
     - [Which CPUs Need the IPI](#which-cpus-need-the-ipi)
     - [Enforcing the Protocol](#enforcing-the-protocol)
     - [Example: Reclaiming a Private Page](#example-reclaiming-a-private-page)
+  - [BEPOCH](#bepoch)
+    - [Scan Epoch](#scan-epoch)
   - [Page State Transitions](#page-state-transitions)
     - [Private to Shared](#private-to-shared)
     - [Shared to Private](#shared-to-private)
@@ -680,7 +682,7 @@ Live migration adds more `OP_STATE` values. On the source TD:
   exported with `TDH.EXPORT.STATE.TD` and `TDH.EXPORT.STATE.VP`, and memory export continues.
 - `POST_EXPORT`: entered once the start token has been exported with `TDH.EXPORT.TRACK`. The TD
   cannot run anymore, but the destination may already be running and requesting remaining pages on
-  demand (post-copy), so memory can still be exported.
+  demand ([post-copy](tdx-migration-misc.md#migration-phases)), so memory can still be exported.
 
 **Note**: if TDX Connect is enabled for the source TD, on-demand page delivery is not allowed in
 `POST_EXPORT`. Instead, all pages must have been exported in `LIVE_EXPORT` or `PAUSED_EXPORT`,
@@ -961,7 +963,7 @@ with the following fields.
     or because the VMM did not send it. Either way, from the TDX module point of view, the previous
     round of the protocol has not completed.
 - **Block epoch** (`BEPOCH`): proves that `TDH.MEM.TRACK` ran after the page was blocked. It is a
-  field in the PAMT entry of the page.
+  field in the PAMT entry of the page mapped by the blocked SEPT entry.
   - Blocking the page (for example with `TDH.MEM.RANGE.BLOCK`) copies the current `TD_EPOCH` value
     into `BEPOCH`.
   - A dependent seamcall, such as `TDH.MEM.PAGE.REMOVE`, fails with `TDX_EPT_ENTRY_STATE_INCORRECT`
@@ -973,6 +975,8 @@ with the following fields.
       since had a TD exit.
     - `TD_EPOCH` is greater than `BEPOCH + 1`. This means `TDH.MEM.TRACK` ran at least twice, and
       the second call could only succeed once the `REFCOUNT` of epoch `BEPOCH` dropped to 0.
+
+**Note**: `BEPOCH` has other uses besides TLB tracking, see [BEPOCH](#bepoch).
 
 ### Example: Reclaiming a Private Page
 
@@ -1000,6 +1004,58 @@ tracking, and the VMM goes through the following steps:
 In other words, the VMM first closes off new cached translations by marking the SEPT entry
 `BLOCKED`, then flushes the existing cached translations by running the TLB tracking protocol, and
 only then makes the final SEPT entry change to `FREE`.
+
+---
+
+## BEPOCH
+
+`BEPOCH` is a 64-bit field in the PAMT entry of a page. The TDX module uses it for several purposes.
+Its lower bits hold a sampled epoch value, and its upper bits hold flags that tell which use the
+value belongs to. The uses are:
+
+- **Block epoch**: the `TD_EPOCH` value at the time `TDH.MEM.RANGE.BLOCK` blocked the page. It is
+  used for TLB tracking, see [Enforcing the Protocol](#enforcing-the-protocol).
+- **Scan epoch**: the `TD_EPOCH` value at the time a memory scan cleared the Dirty bit of the page
+  during non-blocking live migration export. See [Scan Epoch](#scan-epoch).
+- **Import epoch**: on the destination TD of a live migration, the migration epoch at the time the
+  page was imported.
+
+### Scan Epoch
+
+In non-blocking live migration export, the VMM finds export candidates with
+`TDH.MEM.SCAN.RANGE(DSCAN)`. For each candidate, `DSCAN` clears the Dirty bit of its SEPT entry,
+records the current `TD_EPOCH` in `BEPOCH`, and sets the `SCAN_FLAG` bit (bit 62) of `BEPOCH` to
+indicate that `DSCAN` sampled the value.
+
+So a scan epoch is a sampled `TD_EPOCH` value, just like a block epoch described in
+[Enforcing the Protocol](#enforcing-the-protocol). Only the flag differs:
+
+- `SCAN_FLAG` is 1: a scan epoch, written by `DSCAN`.
+- `SCAN_FLAG` is 0: a block epoch, written by `TDH.MEM.RANGE.BLOCK`.
+
+Both epochs serve TLB tracking, and the epoch comparison ignores `SCAN_FLAG`. They only protect
+different SEPT changes:
+
+- **Block epoch**: the page is blocked, so cached translations must be flushed before a dependent
+  seamcall, such as `TDH.MEM.PAGE.REMOVE`, can proceed.
+- **Scan epoch**: the Dirty bit of the page is cleared, so cached translations must be flushed
+  before `TDH.EXPORT.MEM` exports the page. Otherwise a CPU with a cached translation does not set
+  the Dirty bit on the next write, and a page modified after export goes undetected.
+
+The scan epoch also serves another purpose. It helps `TDH.EXPORT.MEM` decide whether to export a
+page or skip it, leaving it for a later round.
+
+`TDH.EXPORT.MEM` skips `MAPPED` or `EXPORTED_MODIFIED` pages (see
+[SEPT Page States](#sept-page-states)) that may have changed since the last `DSCAN`. The rationale
+is probably that the page may still be changing and could therefore need another export, so skip now
+and re-evaluate it in a later round.
+
+Here are the skip conditions.
+
+- The Dirty bit is set: the TD wrote the page after `DSCAN` cleared the Dirty bit.
+- `SCAN_FLAG` is 0: `DSCAN` never processed the page, or another operation wrote `BEPOCH` after
+  `DSCAN`. For example, the page was blocked and unblocked, or removed and added again (see
+  [Page State Transitions](#page-state-transitions)).
 
 ---
 
