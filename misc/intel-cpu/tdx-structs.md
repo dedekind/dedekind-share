@@ -467,7 +467,8 @@ Additional comments.
   flag exists only for backward compatibility, new software should always set it.
 - `PAGE_RELEASE` is implicitly set to 1 when `TDX_CONNECT` is 1.
 - `TDX_CONNECT` may not be set if `ATTRIBUTES.MIGRATABLE` is 1 and the TDX module has been
-  configured for write-blocking based export.
+  configured for
+  [write-blocking based export](tdx-migration-misc.md#non-blocking-vs-write-blocking-export).
 
 ### Allowed CONFIG_FLAGS Values
 
@@ -556,7 +557,8 @@ In practice, the only EPTP control the VMM chooses is the EPT depth: 3 for 4-lev
 **Notes**:
 
 - The TDX module enables the EPT accessed and dirty (A/D) flags only during live migration, because
-  non-blocking export uses them to track accessed and dirty pages.
+  [non-blocking export](tdx-migration-misc.md#non-blocking-vs-write-blocking-export) uses them to
+  track accessed and dirty pages.
 - TDs cannot use EPTP switching. The EPTP-list address of the TD VMCS is fixed to an invalid value,
   and `VMFUNC` is not supported.
 - The Shared EPT root is not in the EPTP. It is in a separate "Shared EPTP"TD VMCS field, which the

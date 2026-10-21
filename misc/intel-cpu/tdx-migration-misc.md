@@ -3,7 +3,7 @@
 - **Author**: Artem Bityutskiy
 - **Version**: 0.1
 - **Date**: 2026-07-03
-- **Last updated**: 2026-10-20
+- **Last updated**: 2026-10-21
 
 **Disclaimer**: These notes reflect my current understanding of TDX live migration concepts and
 mechanisms and may contain errors or omissions. They are not an official Intel document. Refer to
@@ -20,6 +20,8 @@ migration, intended for reference from my other documents.
   Tdcalls include all `TDG.*` leaf functions.
 - `SEAMCALL` and `TDCALL` refer to the CPU instructions, while `seamcall` and `tdcall` refer to
   the leaf functions they invoke.
+- **HPA** means a host physical address of a page owned by the VMM. The TDX specs often call it
+  a "shared HPA", but this document uses "HPA".
 
 ---
 
@@ -27,7 +29,8 @@ migration, intended for reference from my other documents.
 
 - [TDX Live Migration](#tdx-live-migration)
   - [Table of Contents](#table-of-contents)
-    - [Migration Phases](#migration-phases)
+  - [Non-Blocking vs Write-Blocking Export](#non-blocking-vs-write-blocking-export)
+  - [Migration Phases](#migration-phases)
   - [Enumeration](#enumeration)
     - [Individual Features](#individual-features)
     - [Enhanced Import](#enhanced-import)
@@ -37,7 +40,29 @@ migration, intended for reference from my other documents.
       - [NO\_REOWN](#no_reown)
       - [Partial GPA List Processing](#partial-gpa-list-processing)
 
-### Migration Phases
+## Non-Blocking vs Write-Blocking Export
+
+The TDX module specification defines two page modification tracking mechanisms:
+
+- **Non-blocking export** (TDX spec name: Non-Blocking Memory Export): detects page modifications by
+  scanning the SEPT for the Accessed and Dirty bits and for the page state (see
+  [SEPT Page States](tdx-misc.md#sept-page-states)).
+- **Write-blocking export** (TDX spec name: Write-Blocking Based Memory Export): blocks a page for
+  writing before exporting it. A TD write to the page causes an EPT violation TD exit, and the VMM
+  is expected to unblock the page, and later block and re-export it. This mode is outside the scope
+  of this document.
+
+The choice between the two modes is a TDX module configuration parameter that the VMM selects
+during TDX module initialization, not a per-TD or per-migration choice. The default is
+write-blocking. A TD-preserving TDX module update may change the mode to non-blocking if no export
+session has been used before.
+
+**Note**: A TD configured for TDX Connect can use only the non-blocking mode. While a TDI is bound,
+DMA to the TD memory must not fail. Write-blocking blocks pages for writing, so a DMA write by the
+TDI could fail. A failed DMA write is a fatal error for the underlying PCIe/CXL device, so
+write-blocking cannot be used.
+
+## Migration Phases
 
 The TDX module divides the TD migration session into two phases: **in-order** and **out-of-order**,
 corresponding to the pre-copy and post-copy phases of live migration.
@@ -75,22 +100,24 @@ Here are the individual features enumerated by
   same across the migration. The TDX module only allows configuring this value for migratable TDs.
 - `PARTITIONED_TD_MIGRATION` (bit 21) indicates support for migrating partitioned TDs, i.e., TDs
   configured with one or more L2 VMs.
-- `NON_BLOCKING_EXPORT` (bit 41) indicates support for the non-blocking export mode.
+- `NON_BLOCKING_EXPORT` (bit 41) indicates support for the
+  [non-blocking export](#non-blocking-vs-write-blocking-export) mode.
 - `SCAN_EXPORT_RESTORE` (bit 43) indicates support for the `EXPORT_RESTORE` operation of the
   `TDH.MEM.SCAN.RANGE` seamcall. It can be used in the abort flow as a simpler and more efficient
   alternative to `TDH.EXPORT.RESTORE`.
 - `IMPORT_PAGE_STATUS` (bit 44) indicates that `TDH.IMPORT.MEM` reports more detail in the page
   list entries on output. It sets the `INVALID` bit (63) for provided pages it did not use, and for
-  a `CANCEL` that removed a page, it returns the HPA of the removed page with the `REMOVED` bit (61)
-  set.
+  a [CANCEL operation](tdx-migration-structs.md#gpa-list-entry-operation-values) that removed a
+  page, it returns the HPA of the removed page with the `REMOVED` bit (61) set.
 - `DEBUG_RO_TD_MIGRATION` (bit 52) indicates support for combining `ATTRIBUTES.DEBUG` and
   `ATTRIBUTES.MIGRATABLE` (see [ATTRIBUTES](tdx-structs.md#attributes)). Without this bit, the two
   are mutually exclusive. With this bit set, a TD can be both debuggable and migratable, but
   debugging becomes read-only: the host VMM can read TD memory but not write it, and only the
   metadata fields already writable for a non-debuggable TD remain writable.
 - `LIST_ERROR_COUNT` (bit 54) indicates that `TDH.EXPORT.BLOCKW`, `TDH.EXPORT.MEM`,
-  `TDH.EXPORT.RESTORE` and `TDH.IMPORT.MEM` support version 1, which returns a GPA list error count
-  on output. Otherwise, only version 0 is supported.
+  `TDH.EXPORT.RESTORE` and `TDH.IMPORT.MEM` support version 1, which returns a
+  [GPA list](tdx-migration-structs.md#gpa-list) error count on output. Otherwise, only version 0 is
+  supported.
 - `MIG_SETUP` (bit 55) indicates support for MSS, the Migration Setup service extension of the TDX
   module.
 
@@ -154,8 +181,9 @@ A physical page is either:
 - TD-owned: private, encrypted with the TD's HKID, mapped by a SEPT entry
 - VMM-owned: regular host memory.
 
-Each incoming GPA list entry carries an `OPERATION` field. Without `NO_REOWN`, each operation can
-change page ownership:
+Each incoming [GPA list](tdx-migration-structs.md#gpa-list) entry carries an
+[OPERATION](tdx-migration-structs.md#gpa-list-entry-operation-values) field.  Without `NO_REOWN`,
+each operation can change page ownership:
 
 - `MIGRATE` converts a VMM-owned page to a TD-owned page. The page comes from the destination page
   list, or the migration buffer itself is converted (in-place import). If the page was already

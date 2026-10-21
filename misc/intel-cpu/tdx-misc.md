@@ -282,9 +282,13 @@ Here are some of the resumable exit codes:
 
 - `TDX_INTERRUPTED_RESUMABLE`: a pending event was detected.
 - `TDX_INTERRUPTED_BUSY`: a required TDX module resource was busy.
-- `TDX_INTERRUPTED_LIST_FULL`: the output GPA list-of-lists ran out of free entries.
-- `TDX_INTERRUPTED_LIST_END`: the VMM asked to process only part of an input GPA list. This code is
-  interesting because it reports a deliberate VMM request, not an interrupt or contention.
+- `TDX_INTERRUPTED_LIST_FULL`: returned only by `TDH.MEM.SCAN.COMP` and `TDH.MEM.SCAN.RANGE`. The
+  output [GPA list-of-lists](tdx-migration-structs.md#gpa-list-of-lists) ran out of free entries.
+- `TDX_INTERRUPTED_LIST_END`: returned only by `TDH.IMPORT.MEM`, when the VMM asked to process only
+  part of an input [GPA list](tdx-migration-structs.md#gpa-list), an enhanced import feature. See
+  [Partial GPA List Processing](tdx-migration-misc.md#partial-gpa-list-processing).
+  This code is a bit unusual because it reports a deliberate VMM request, not an interrupt or
+  contention.
 - `TDX_INTERRUPTED_BLOCKED_RANGE`: a blocked SEPT entry was found during a scan.
 - `TDX_INTERRUPTED_PAMT`: with dynamic PAMT, the operation needs more PAMT pages. The VMM has to
   add them with `TDH.PHYMEM.PAMT.ADD` and resume.
@@ -740,8 +744,9 @@ SEPTs use different names and encodings.
 
 ### Live Migration-Specific States
 
-The following states track page export in the source TD. They belong to non-blocking export, which
-uses the EPT Dirty bit to detect modified pages.
+The following states track page export in the source TD. They belong to
+[non-blocking export](tdx-migration-misc.md#non-blocking-vs-write-blocking-export), which uses the
+EPT Dirty bit to detect modified pages.
 
 - `EXPORTED`: the page was exported and not modified since.
 - `EXPORTED_MODIFIED`: the page was exported, but its content or attributes changed since. The
@@ -750,8 +755,9 @@ uses the EPT Dirty bit to detect modified pages.
   For example, if the TD releases an exported page with `TDG.MEM.PAGE.RELEASE`, the page becomes
   `PENDING_EXPORTED_MODIFIED`.
 - `EXPORTED_BLOCKED`, `PENDING_EXPORTED_BLOCKED`, and `EXPORTED_REMOVED`: the VMM blocked or
-  removed an exported page. `TDH.EXPORT.MEM` exports a CANCEL operation for the page, which moves
-  it to the `BLOCKED`, `PENDING_BLOCKED`, or `FREE` state.
+  removed an exported page. `TDH.EXPORT.MEM` exports a
+  [CANCEL operation](tdx-migration-structs.md#gpa-list-entry-operation-values) for the page, which
+  moves it to the `BLOCKED`, `PENDING_BLOCKED`, or `FREE` state.
 
 If the export is aborted, the VMM moves the remaining exported pages back to non-exported states
 with `TDH.EXPORT.RESTORE`. If migration succeeds, the source TD is torn down.
@@ -759,12 +765,15 @@ with `TDH.EXPORT.RESTORE`. If migration succeeds, the source TD is torn down.
 The `REMOVED` state is used only on the destination TD.
 
 - `REMOVED`: the page was removed while an import session is in progress, either by the VMM with
-  `TDH.MEM.PAGE.REMOVE` or by an imported CANCEL operation. The entry is not present, like
-  `FREE`, but the TDX module uses it to reject importing an older copy of the page to the GPA.
+  `TDH.MEM.PAGE.REMOVE` or by an imported
+  [CANCEL operation](tdx-migration-structs.md#gpa-list-entry-operation-values). The entry is not
+  present, like `FREE`, but the TDX module uses it to reject importing an older copy of the page to
+  the GPA.
 
-Write-blocking export is the other export mode. Instead of using the Dirty bit, the VMM blocks pages
-for writing with `TDH.EXPORT.BLOCKW` before exporting them. A TD write to such a page causes an EPT
-violation [TD exit](#vm-exit-and-td-exit), and the VMM is expected to unblock the page with
+[Write-blocking export](tdx-migration-misc.md#non-blocking-vs-write-blocking-export) is the other
+export mode. Instead of using the Dirty bit, the VMM blocks pages for writing with
+`TDH.EXPORT.BLOCKW` before exporting them. A TD write to such a page causes an EPT violation
+[TD exit](#vm-exit-and-td-exit), and the VMM is expected to unblock the page with
 `TDH.EXPORT.UNBLOCKW`, and later block and re-export it. It uses the following states.
 
 - `BLOCKEDW`: the page is blocked for writing, so the CPU can no longer create new cached
@@ -1016,7 +1025,8 @@ value belongs to. The uses are:
 - **Block epoch**: the `TD_EPOCH` value at the time `TDH.MEM.RANGE.BLOCK` blocked the page. It is
   used for TLB tracking, see [Enforcing the Protocol](#enforcing-the-protocol).
 - **Scan epoch**: the `TD_EPOCH` value at the time a memory scan cleared the Dirty bit of the page
-  during non-blocking live migration export. See [Scan Epoch](#scan-epoch).
+  during [non-blocking export](tdx-migration-misc.md#non-blocking-vs-write-blocking-export) of live
+  migration. See [Scan Epoch](#scan-epoch).
 - **Import epoch**: on the destination TD of a live migration, the migration epoch at the time the
   page was imported.
 
