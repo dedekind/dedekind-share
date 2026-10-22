@@ -3,7 +3,7 @@
 - **Author**: Artem Bityutskiy
 - **Version**: 0.1
 - **Date**: 2026-07-03
-- **Last updated**: 2026-10-17
+- **Last updated**: 2026-10-22
 
 **Disclaimer**: These notes reflect my current understanding of TDX module concepts and mechanisms
 and may contain errors or omissions. They are not an official Intel document. Refer to the
@@ -18,7 +18,7 @@ structures, intended for reference from my other documents.
   For example, `TDH.MIG.SETUP` is a seamcall.
 - A **tdcall** is a TDX module ABI leaf function invoked with the `TDCALL` instruction.
   Tdcalls include all `TDG.*` leaf functions.
-- `SEAMCALL` and `TDCALL` refer to the CPU instructions, while `seamcall` and `tdcall` refer to
+- `SEAMCALL` and `TDCALL` refer to the CPU instructions, while seamcall and tdcall refer to
   the leaf functions they invoke.
 
 ---
@@ -62,12 +62,13 @@ structures, intended for reference from my other documents.
 
 ## TDCS
 
-The **TDCS** (Trust Domain Control Structure) is the per-TD control structure that holds the runtime
-state and configuration of the TD. Examples of the kinds of data it contains include:
+The **TDCS** (Trust Domain Control Structure) is the control structure of a TD. It holds the
+runtime state and configuration of the TD, for example:
 
 - TD attributes, such as:
   - `ATTRIBUTES.MIGRATABLE`: whether TD live migration is allowed.
-  - `ATTRIBUTES.DEBUG`: VMM can access vCPU state and private memory when debug mode is enabled.
+  - `ATTRIBUTES.DEBUG`: the VMM can access vCPU state and private memory when debug mode is
+    enabled.
   - `ATTRIBUTES.PERFMON`: whether TD software can use performance monitoring capabilities.
 - TD operation state (`OP_STATE`), such as `UNINITIALIZED`, `RUNNABLE` or `LIVE_EXPORT`.
 - The virtual CPUID configuration, and full or partial values for some of the MSRs.
@@ -75,22 +76,23 @@ state and configuration of the TD. Examples of the kinds of data it contains inc
 - The RTMRs (Run-Time extendable Measurement Registers).
 - Migration policy `MIG_SETUP_TD_POLICY_HASH`, migration epoch counters, migration keys, and other
   live migration metadata.
-- The SEPT root page pointer.
+- The SEPT (Secure EPT) root page pointer.
 
 The TDCS physical layout is non-architectural and subject to change. It is an internal
-multi-page TDX module structure. The VMM does not need to know the HPAs of TDCS pages. The TDX
-module finds them from the TDR page.
+multi-page TDX module structure. The VMM does not need to know the HPAs (host physical addresses)
+of TDCS pages. The TDX module finds them using the TDR page.
 
-The physical pages that hold the TDCS are called TDCX (TD Control structure eXtension) pages. The
-VMM allocates these pages and adds them to the TDCS with the `TDH.MNG.ADDCX` seamcall.
+The physical pages that hold the TDCS are called TDCX (Trust Domain Control structure eXtension)
+pages. The VMM allocates these pages and adds them to the TDCS with the `TDH.MNG.ADDCX` seamcall.
 `TDH.MNG.INIT` initializes the TDCS in these pages.
 
-TDCS pages are encrypted with the TD private HKID and are not directly accessible by the VMM or TD.
+TDCS pages are encrypted with the TD private HKID (host key ID) and are not directly accessible by
+the VMM or TD.
 The TDX module maps the TDCS and other control pages into its own virtual address space using its
 own page tables. The VMM accesses selected TDCS fields with the `TDH.MNG.RD` and `TDH.MNG.WR`
 seamcalls. The TD accesses its permitted TDCS fields with the `TDG.VM.RD` and `TDG.VM.WR` tdcalls.
 
-TDCS holds TD-wide runtime state and configuration. Per-vCPU state is held separately in the TDVPS.
+Per-vCPU state is held separately in the [TDVPS](#tdvps).
 
 ---
 
@@ -100,8 +102,8 @@ The **TDR** (Trust Domain Root) is a top-level TDX module data structure. It is 
 of TD control structures. It points to the [TDCS](#tdcs) pages, which in turn contain the SEPT root
 page pointer.
 
-**TD handle** is the HPA of the TDR page of the TD. Many seamcalls operate on a specific TD and take
-the TD handle as input.
+The **TD handle** is the HPA of the TDR page of the TD. Many seamcalls operate on a specific TD and
+take the TD handle as input.
 
 The TDR contents and layout are non-architectural and subject to change. It is an internal
 TDX module data structure. For the VMM, the role of the TDR is to identify the TD in seamcalls.
@@ -109,9 +111,9 @@ TDX module data structure. For the VMM, the role of the TDR is to identify the T
 The TDR is stored in one 4KiB TDR page. The VMM allocates this page and passes its HPA to
 `TDH.MNG.CREATE`. The TDX module then takes ownership of the page and initializes the TDR in it.
 
-The TDR page belongs to the TDX module, not the VMM or the TD. It is not mapped into the GPA
-space of the TD. It is encrypted using the TDX global private HKID, so neither the VMM nor
-the TD can directly access its contents.
+The TDR page belongs to the TDX module, not the VMM or the TD. It is not mapped into the guest
+physical address (GPA) space of the TD. It is encrypted using the TDX global private HKID, so
+neither the VMM nor the TD can directly access its contents.
 
 The TDR page is the last page that the VMM reclaims during TD teardown, after all other TD pages
 have been reclaimed.
@@ -123,7 +125,7 @@ have been reclaimed.
 A **metadata field** consists of a `FIELD_ID` and its value. The TDX ABI defines the meaning, scope,
 value format, and access rules for each field.
 
-For example, [`TD_CTLS`](#td_ctls) is a TD-scope metadata field.
+For example, [TD_CTLS](#td_ctls) is a metadata field with TD scope.
 
 - **Field ID**: `0x9110000300000017`.
 - **Meaning**: Bitmap of TD controls that the TD may modify at run time.
@@ -140,8 +142,8 @@ Examples of seamcalls and tdcalls for accessing metadata fields:
 | TD     | `TDH.MNG.RD`  | `TDH.MNG.WR`   | `TDG.VM.RD`  | `TDG.VM.WR`  |
 | vCPU   | `TDH.VP.RD`   | `TDH.VP.WR`    | `TDG.VP.RD`  | `TDG.VP.WR`  |
 
-Other metadata fields described in this document include [`ATTRIBUTES`](#attributes),
-[`XFAM`](#xfam), and [`TDX_FEATURES0`](#tdx_features0).
+Other metadata fields described in this document include [ATTRIBUTES](#attributes),
+[XFAM](#xfam), and [TDX_FEATURES0](#tdx_features0).
 
 ---
 
@@ -181,15 +183,16 @@ and the field offsets, sizes, and reserved ranges are part of the ABI contract.
 | 236    | 20   | Reserved                        | No       |
 | 256    | 16*n | [CPUID_CONFIG](#cpuid_config)   | No       |
 
-The `CPUID_CONFIG` area is a variable-length array of 16-byte entries defined by the ABI for the TDX
-module major version in use.
+The `CPUID_CONFIG` area is an array of 16-byte entries. The ABI defines the number of entries for
+the TDX module major version in use.
 
 The "Attested" column indicates whether the field is included in `TDREPORT_STRUCT` and therefore in
 the TD attestation quote that a remote verifier sees.
 
 **Note**: When a TD is created by live migration, it receives its immutable configuration from the
 source platform. Instead of a local `TDH.MNG.INIT`, the destination VMM uses
-`TDH.IMPORT.STATE.IMMUTABLE` to import this immutable state. In other words, the VMM does not use
+`TDH.IMPORT.STATE.IMMUTABLE` to import this
+[immutable state](tdx-migration-structs.md#immutable-state). In other words, the VMM does not use
 `TD_PARAMS` and `TDH.MNG.INIT` in this case.
 
 ---
@@ -203,18 +206,17 @@ be changed afterward, neither by the VMM nor by the TD.
 The main dividing line between `ATTRIBUTES` and other `TD_PARAMS` fields is whether a property
 affects TD security, either by weakening or by strengthening it. For example, debugging and
 profiling make the TD more observable to the untrusted VMM, so they belong in `ATTRIBUTES`.
-This line is not strict though.
+The line is not strict.
 
-`ATTRIBUTES` is attested: it ends up in the TD attestation quote, so the remote verifier can decide
-whether the TD configuration is acceptable.
+`ATTRIBUTES` is attested: it is included in the TD attestation quote, so the remote verifier can
+decide whether the TD configuration is acceptable.
 
 The VMM can read `ATTRIBUTES` from the TDCS with `TDH.MNG.RD`. The TD can read its own `ATTRIBUTES`
 with `TDG.VP.INFO` and `TDG.VM.RD`.
 
 ### ATTRIBUTES Groups
 
-Bits in `ATTRIBUTES` are split into groups based on their impact on TD security. Here are the
-groups.
+Bits in `ATTRIBUTES` are split into groups based on their impact on TD security.
 
 | Bits  | Group    | Meaning                                           |
 |-------|----------|---------------------------------------------------|
@@ -224,7 +226,7 @@ groups.
 | 55:32 | Reserved | Must be 0.                                        |
 | 63:56 | `OTHER`  | Attested, but no impact on TD security.           |
 
-A verifier does not have to recognize every bit. If an unknown bit is encountered, it can still
+A verifier does not have to recognize every bit. If it encounters an unknown bit, it can still
 decide based on the group the bit belongs to.
 
 Bits in the `SEC` group are further marked positive or negative.
@@ -264,7 +266,7 @@ Additional comments.
   not saved and restored on TD entry and exit, so they keep counting TD activity as part of the
   whole system. This is why the bit is negative: the untrusted host can observe TD execution.
 - `SEPT_VE_DISABLE` is described in the [#VE](tdx-misc.md#ve) section.
-- `MIGRATABLE` allows the TD to be moved to another machine while it keeps running.
+- `MIGRATABLE` allows the TD to be moved to another platform while it keeps running.
 
 ### Allowed ATTRIBUTES Values
 
@@ -290,31 +292,31 @@ Some bits are mutually exclusive, for example `PERFMON` and `MIGRATABLE`, as wel
 
 ## XFAM
 
-This subsection assumes familiarity with XSAVE state components, their types, `XCR0`, `IA32_XSS`,
-and `CPUID.0xD`, which [XSAVE and State Components](x86-misc.md#xsave-and-state-components)
-explains.
+This section assumes familiarity with XSAVE state components, their types, `XCR0`, `IA32_XSS`,
+and `CPUID(0xD)`. See [XSAVE and State Components](x86-misc.md#xsave-and-state-components) for
+an explanation.
 
 `XFAM` (eXtended Features Available Mask) is a 64-bit field in the
 [TD_PARAMS](#td_params) structure. The VMM uses it to configure the TD at build time through
 `TDH.MNG.INIT`. It defines which CPU extended features the TD is allowed to use. It is stored in the
 [TDCS](#tdcs) and cannot be changed afterward, neither by the VMM nor by the TD.
 
-`XFAM` is attested: it ends up in the TD attestation quote, so the remote verifier can decide
-whether the TD configuration is acceptable.
+`XFAM` is attested: it is included in the TD attestation quote, so the remote verifier can
+decide whether the TD configuration is acceptable.
 
 ### XFAM and the State Component Bitmap
 
 `XFAM` is a state component bitmap covering both user and supervisor components. It defines which
-bits the TD may set in `XCR0` and `IA32_XSS`, and what `CPUID(0xD)` reports to the TD. That, in
-turn, determines which CPU features the TD may use.
+bits the TD may set in `XCR0` and `IA32_XSS`, and what `CPUID(0xD)` reports to the TD. That
+determines which CPU features the TD may use.
 
 When the TD changes `XCR0` or `IA32_XSS`, the TDX module validates the new value. It applies the
 architectural rules the CPU would enforce, and on top of them requires every bit set to also be set
 in `XFAM`. A value that fails either check gives `#GP(0)`.
 
 The architectural limits that apply to `XCR0` and `IA32_XSS` also apply to `XFAM`: reserved bits,
-unsupported features, and invalid bit combinations are not allowed. On top of that, the TDX module
-adds rules about which bits and bit combinations a TD may be configured with.
+unsupported features, and invalid bit combinations are not allowed. The TDX module also adds
+rules about which bits and bit combinations a TD may be configured with.
 
 ### XFAM Bits
 
@@ -325,8 +327,8 @@ Here is a summary of the `XFAM` bits and their meanings.
 | 0     | U   | FP (x87)       | Always 1.                                                |
 | 1     | U   | SSE            | Always 1.                                                |
 | 2     | U   | AVX            | Lets the TD enable AVX in `XCR0`.                        |
-| 4:3   | U   | MPX            | Always 0, MPX is deprecated.                             |
-| 7:5   | U   | AVX-512        | Lets the TD enable AVX-512 in `XCR0`, requires bit 2.    |
+| 4:3   | U   | MPX            | Always 0 because MPX is deprecated.                      |
+| 7:5   | U   | AVX-512        | Lets the TD enable AVX-512 in `XCR0`. Requires bit 2.    |
 | 8     | S   | PT (RTIT)      | Lets the TD access the `IA32_RTIT_*` MSRs.               |
 | 9     | U   | PK (PKRU)      | Lets the TD set `CR4.PKE`.                               |
 | 10    | S   | ENQCMD (PASID) | Always 0, unless TDX Connect is used.                    |
@@ -352,43 +354,37 @@ are called **XSAVE-enabled** features. Both are Intel SDM terms.
 
 For XSAVE-enabled features, such as AVX, AVX-512, AMX and APX, the TD can use the feature only when
 the state component bits are 1 in both `XFAM` and the TD `XCR0`. To disable a feature, it is enough
-for the VMM to clear the bits in `XFAM`: the TD then will not be able to set them in `XCR0`, and
-the CPU will raise `#UD` on an instruction that tries to use the feature.
+for the VMM to clear the bits in `XFAM`. The TD then cannot set them in `XCR0`, and the CPU
+raises `#UD` on an instruction that tries to use the feature.
 
 For XSAVE-supported features that are not XSAVE-enabled, the state component bits govern only state
 save and restore. The CPU lets software use these features regardless of the `XCR0` or `IA32_XSS`
 state component bit. In other words, the CPU itself does not enforce any restriction based on
-`XFAM`. For the XFAM bits listed above, the TDX module enforces these restrictions.
+`XFAM`. Instead, the TDX module enforces the `XFAM` restrictions for the following features.
 
 - PK, CET and ULI: the enable switch is a `CR4` bit, and `XFAM` decides whether the TDX module lets
   the TD set `CR4.PKE`, `CR4.CET` or `CR4.UINTR`. A disallowed write gives `#GP(0)`.
 - PT and LBR: there is no enable switch at all. `XFAM` decides whether the TDX module lets the TD
   access the MSRs of the feature. A disallowed access gives `#GP(0)` or a [#VE](tdx-misc.md#ve).
 
-Conclusion: `XFAM` is more than a bitmap of the `XCR0` and `IA32_XSS` bits the TD may set. It is
-more practical to look at it as the mechanism that controls which CPU features the TD may use.
+In summary, `XFAM` is more than a bitmap of the `XCR0` and `IA32_XSS` bits the TD may set. It also
+controls which CPU features the TD may use.
 
 ### XFAM and CPUID Virtualization
 
 `XFAM` also shapes the virtual CPUID values the TD sees, so that a TD does not enumerate features it
 may not use. For example:
 
-- `CPUID(0xD)` enumerates the state components available to the TD, and these are the `XFAM` bits.
+- `CPUID(0xD)` enumerates the state components available to the TD, as defined by `XFAM`.
 - Feature bits in other leaves are derived from `XFAM` too, for example `CPUID(1).ECX.AVX` comes
   from `XFAM` bit 2.
 
 ### Allowed XFAM Values
 
 Which bits is the VMM allowed to set in `XFAM`? The answer comes from `XFAM_FIXED0` and
-`XFAM_FIXED1`, which the VMM reads with `TDH.SYS.RD` or `TDH.SYS.RDALL`. They are analogous to
-`ATTRIBUTES_FIXED0` and `ATTRIBUTES_FIXED1` of the [ATTRIBUTES](#attributes) field.
-
-- `XFAM_FIXED0` tells which bits may be set. If a bit is 0 there, the corresponding `XFAM` bit must
-  be 0. If a bit is 1 there, the bit may be 0 or 1, unless `XFAM_FIXED1` forces it to 1.
-- `XFAM_FIXED1` tells which bits must be set. If a bit is 1 there, the corresponding `XFAM` bit must
-  be 1. If a bit is 0 there, the bit may be 0 or 1, as long as `XFAM_FIXED0` allows it to be 1.
-
-A useful way to read the two bitmaps together is this: `XFAM_FIXED0` clears unsupported bits, and
+`XFAM_FIXED1`, which the VMM reads with `TDH.SYS.RD` or `TDH.SYS.RDALL`. They work the same way as
+`ATTRIBUTES_FIXED0` and `ATTRIBUTES_FIXED1` described in
+[Allowed ATTRIBUTES Values](#allowed-attributes-values). `XFAM_FIXED0` clears unsupported bits, and
 `XFAM_FIXED1` forces required bits. The VMM can choose the value only when the bit is 1 in
 `XFAM_FIXED0` and 0 in `XFAM_FIXED1`.
 
@@ -405,14 +401,15 @@ untrusted VMM. The TDX module keeps it in the XSAVE buffer of the [TDVPS](#tdvps
 defines which components go there.
 
 - On TD entry, `TDH.VP.ENTER` restores from the TDVPS the components allowed by `XFAM`.
-- On asynchronous [TD exit](tdx-misc.md#vm-exit-and-td-exit), the module saves them back to the
-  TDVPS and then clears the extended state, so the VMM cannot observe anything the TD left behind.
+- On asynchronous [TD exit](tdx-misc.md#vm-exit-and-td-exit), the TDX module saves them back to
+  the TDVPS and then clears the extended state, so the VMM cannot observe anything the TD left
+  behind.
 - As described in [Host State Across TDH.VP.ENTER](tdx-misc.md#host-state-across-tdhvpenter), the
   VMM is responsible for host extended state that the TD is allowed to use, per `XFAM`, and that the
   VMM needs after `TDH.VP.ENTER` returns.
 
 The XMM registers are a special case, because the `TDG.VP.VMCALL` ABI uses them to pass data between
-the TD and the VMM. The TD selects the registers to share in the `RCX` input of the tdcall. The
+the TD and the VMM. The TD selects the registers to share in the `RCX` input of the tdcall. The TDX
 module saves the other state in the TDVPS, but it leaves the selected XMM registers visible to the
 VMM. On the next TD entry after `TDG.VP.VMCALL`, the same `RCX` value selects the XMM registers that
 the VMM passes back to the TD.
@@ -430,13 +427,12 @@ seamcall, `CONFIG_FLAGS` is not attested.
 
 The flags fall into three categories.
 
-- **Address space layout**: `GPAW`, `MAXPA_VIRT` and `MAXGPA_VIRT` define where the `SHARED` bit
-  sits in a GPA and which address widths the TD sees.
-- **Interface hardening**: `NO_RBP_MOD` prevents the VMM from changing the TD's frame pointer
-  (`RBP`) across tdcall and TD entry/exit, while `FLEXIBLE_PENDING_VE` lets the TD choose how
-  `#VE(PENDING)` is handled on PENDING-page accesses.
-- **Feature enabling**: `TDX_CONNECT`, `PAGE_RELEASE` and `SEALING` enable facilities the TD may
-  use.
+- **Layout**: `GPAW` defines where the `SHARED` bit sits in a GPA, while `MAXPA_VIRT` and
+  `MAXGPA_VIRT` define the address widths the TD sees.
+- **Interface**: `NO_RBP_MOD` prevents the VMM from changing the frame pointer (`RBP`) of the TD
+  across tdcalls and TD entries and exits, while `FLEXIBLE_PENDING_VE` lets the TD choose how
+  `#VE(PENDING)` is handled on accesses to `PENDING` pages.
+- **Feature**: `TDX_CONNECT`, `PAGE_RELEASE` and `SEALING` enable facilities the TD may use.
 
 ### CONFIG_FLAGS Bits
 
@@ -455,38 +451,30 @@ The flags fall into three categories.
 Additional comments.
 
 - `GPAW` does not directly configure a guest physical address width, despite the name. It
-  selects which GPA bit is the `SHARED` bit, `GPA[47]` when 0 and `GPA[51]` when 1. This determines
-  the effective GPA width for the TD: 48 or 52 bits. This also splits the GPA space into a private
-  half and a shared half. Setting it to 1 requires 5-level EPT, so the VMM must also set the EPT
+  selects which GPA bit is the `SHARED` bit, `GPA[47]` when 0 and `GPA[51]` when 1. This sets
+  the effective GPA width of the TD to 48 or 52 bits and splits the GPA space into a private half
+  and a shared half. Setting it to 1 requires 5-level EPT, so the VMM must also set the EPT
   depth field of [TD_PARAMS.EPTP_CONTROLS](#eptp) to 4.
-- `NO_RBP_MOD` fixes a legacy TDX module ABI imperfection. The `RBP` register is the frame pointer
+- `NO_RBP_MOD` fixes a legacy TDX module ABI flaw. The `RBP` register is the frame pointer
   in the x86-64 ABI, classified as callee-saved, so a compiler assumes every function call preserves
-  it. The original TDX module ABI let the VMM pass any `RBP` value back to the TD from a tdcall,
-  which the untrusted VMM could use to attack the TD. With `NO_RBP_MOD` set: `TDG.VP.VMCALL`
-  preserves the `RBP` value of the TD, and `TDH.VP.ENTER` preserves the `RBP` value of the VMM. The
-  flag exists only for backward compatibility, new software should always set it.
+  it. The original TDX module ABI let the VMM pass any `RBP` value back to the TD from a tdcall.
+  This let the untrusted VMM attack the TD. With `NO_RBP_MOD` set, `TDG.VP.VMCALL` preserves the
+  `RBP` value of the TD, and `TDH.VP.ENTER` preserves the `RBP` value of the VMM. The flag exists
+  only for backward compatibility. New software should always set it.
 - `PAGE_RELEASE` is implicitly set to 1 when `TDX_CONNECT` is 1.
-- `TDX_CONNECT` may not be set if `ATTRIBUTES.MIGRATABLE` is 1 and the TDX module has been
+- `TDX_CONNECT` must not be set if `ATTRIBUTES.MIGRATABLE` is 1 and the TDX module has been
   configured for
-  [write-blocking based export](tdx-migration-misc.md#non-blocking-vs-write-blocking-export).
+  [write-blocking export](tdx-migration-misc.md#non-blocking-vs-write-blocking-export).
 
 ### Allowed CONFIG_FLAGS Values
 
 Not every `CONFIG_FLAGS` bit is supported by every TDX module version and platform. The TDX module
-reports the allowed values in two bitmaps that the VMM reads with the `TDH.SYS.RD` seamcall. They
-are analogous to the `ATTRIBUTES_FIXED0` and `ATTRIBUTES_FIXED1` fields of the
-[ATTRIBUTES](#attributes) structure.
-
-- `CONFIG_FLAGS_FIXED0` tells which bits may be set. If a bit is 0 there, the corresponding
-  `CONFIG_FLAGS` bit must be 0. If a bit is 1 there, the bit may be 0 or 1, unless
-  `CONFIG_FLAGS_FIXED1` forces it to 1.
-- `CONFIG_FLAGS_FIXED1` tells which bits must be set. If a bit is 1 there, the corresponding
-  `CONFIG_FLAGS` bit must be 1. If a bit is 0 there, the bit may be 0 or 1, as long as
-  `CONFIG_FLAGS_FIXED0` allows it to be 1.
-
-A useful way to read the two bitmaps together is this: `CONFIG_FLAGS_FIXED0` clears unsupported
-bits, and `CONFIG_FLAGS_FIXED1` forces required bits. The VMM can choose the value only when the bit
-is 1 in `CONFIG_FLAGS_FIXED0` and 0 in `CONFIG_FLAGS_FIXED1`.
+reports the allowed values in the `CONFIG_FLAGS_FIXED0` and `CONFIG_FLAGS_FIXED1` bitmaps that the
+VMM reads with `TDH.SYS.RD` or `TDH.SYS.RDALL`. They work the same way as `ATTRIBUTES_FIXED0` and
+`ATTRIBUTES_FIXED1` described in [Allowed ATTRIBUTES Values](#allowed-attributes-values).
+`CONFIG_FLAGS_FIXED0` clears unsupported bits, and `CONFIG_FLAGS_FIXED1` forces required bits. The
+VMM can choose the value only when the bit is 1 in `CONFIG_FLAGS_FIXED0` and 0 in
+`CONFIG_FLAGS_FIXED1`.
 
 `TDH.MNG.INIT` rejects a `CONFIG_FLAGS` value that breaks these rules with `TDX_OPERAND_INVALID`.
 
@@ -505,16 +493,16 @@ ABI.
 ### Enumeration CPUID_CONFIG
 
 `TDH.SYS.INFO` returns the `TDSYSINFO_STRUCT` data structure, which includes the `CPUID_CONFIG`
-array of 24 byte entries at offset 132. Here is the layout of one entry.
+array of 24-byte entries at offset 132. Here is the layout of one entry.
 
-| Offset | Size | Field      | Description                                                     |
-|--------|------|------------|-----------------------------------------------------------------|
-| 0      | 4    | `LEAF`     | The `EAX` input value to `CPUID`.                               |
-| 4      | 4    | `SUB_LEAF` | The `ECX` input value. -1 means the leaf has no sub-leaves.     |
-| 8      | 4    | `EAX`      | Mask of configurable bits in the virtual `EAX` return value.    |
-| 12     | 4    | `EBX`      | Mask of configurable bits in the virtual `EBX` return value.    |
-| 16     | 4    | `ECX`      | Mask of configurable bits in the virtual `ECX` return value.    |
-| 20     | 4    | `EDX`      | Mask of configurable bits in the virtual `EDX` return value.    |
+| Offset | Size | Field      | Description                                                  |
+|--------|------|------------|--------------------------------------------------------------|
+| 0      | 4    | `LEAF`     | The `EAX` input value to `CPUID`.                            |
+| 4      | 4    | `SUB_LEAF` | The `ECX` input value. -1 means the leaf has no sub-leaves.  |
+| 8      | 4    | `EAX`      | Mask of configurable bits in the virtual `EAX` return value. |
+| 12     | 4    | `EBX`      | Mask of configurable bits in the virtual `EBX` return value. |
+| 16     | 4    | `ECX`      | Mask of configurable bits in the virtual `ECX` return value. |
+| 20     | 4    | `EDX`      | Mask of configurable bits in the virtual `EDX` return value. |
 
 A mask bit of 1 means the VMM may configure that bit. The `NUM_CPUID_CONFIG` field at offset 128
 specifies how many entries in the array are valid.
@@ -528,12 +516,12 @@ The `TDH.MNG.INIT` seamcall accepts the `TD_PARAMS` structure, which holds the T
 parameters. One of them is the `CPUID_CONFIG` array of 16-byte entries at offset 256, each entry
 corresponding to a virtual CPUID leaf and sub-leaf. Here is the layout of one entry.
 
-| Offset | Size | Field | Description                                  |
-|--------|------|-------|----------------------------------------------|
-| 0      | 4    | `EAX` | Configured value of the virtual `EAX`.       |
-| 4      | 4    | `EBX` | Configured value of the virtual `EBX`.       |
-| 8      | 4    | `ECX` | Configured value of the virtual `ECX`.       |
-| 12     | 4    | `EDX` | Configured value of the virtual `EDX`.       |
+| Offset | Size | Field | Description                            |
+|--------|------|-------|----------------------------------------|
+| 0      | 4    | `EAX` | Configured value of the virtual `EAX`. |
+| 4      | 4    | `EBX` | Configured value of the virtual `EBX`. |
+| 8      | 4    | `ECX` | Configured value of the virtual `ECX`. |
+| 12     | 4    | `EDX` | Configured value of the virtual `EDX`. |
 
 There are no leaf and sub-leaf numbers here. The correspondence is positional: the two arrays have
 the same number of entries, and entry *i* of the configuration `CPUID_CONFIG` array corresponds to
@@ -559,9 +547,9 @@ In practice, the only EPTP control the VMM chooses is the EPT depth: 3 for 4-lev
 - The TDX module enables the EPT accessed and dirty (A/D) flags only during live migration, because
   [non-blocking export](tdx-migration-misc.md#non-blocking-vs-write-blocking-export) uses them to
   track accessed and dirty pages.
-- TDs cannot use EPTP switching. The EPTP-list address of the TD VMCS is fixed to an invalid value,
+- TDs cannot use EPTP switching. The EPTP list address of the TD VMCS is fixed to an invalid value,
   and `VMFUNC` is not supported.
-- The Shared EPT root is not in the EPTP. It is in a separate "Shared EPTP"TD VMCS field, which the
+- The Shared EPT root is not in the EPTP. It is in a separate "Shared EPTP" TD VMCS field, which the
   VMM writes with `TDH.VP.WR`. The `SHARED` bit of the GPA selects between the SEPT and the Shared
   EPT, not an EPTP index.
 - With TD partitioning, each L2 VM has its own SEPT tree, and the EPTP of its L2 VMCS points at the
@@ -572,9 +560,8 @@ In practice, the only EPTP control the VMM chooses is the EPT depth: 3 for 4-lev
 
 ## TDVPS
 
-The **TDVPS** (Trust Domain Virtual Processor State) is the per-vCPU counterpart of the
-[TDCS](#tdcs). It holds the runtime state and configuration of a single vCPU. Examples of the kinds
-of data it contains include:
+The **TDVPS** (Trust Domain Virtual Processor State) is the counterpart of the [TDCS](#tdcs) for a
+single vCPU. It holds the runtime state and configuration of the vCPU, for example:
 
 - TD VMCS (Virtual Machine Control Structure): the standard Intel VT-x structure that controls
   virtual CPUs, inaccessible to the VMM in the case of TDs.
@@ -602,15 +589,15 @@ HPAs of TDCX pages.
 
 ## VE_INFO
 
-`VE_INFO` is the TDX name for the per vCPU
+`VE_INFO` is the TDX name for the per-vCPU
 [virtualization exception information area](x86-misc.md#virtualization-exception-information-area),
 which carries the details of a [#VE](tdx-misc.md#ve). This section describes the TDX-specific
 aspects of the area.
 
 `VE_INFO` is part of the [TDVPS](#tdvps). It occupies the first 128 bytes of the TDVPR page, which
 makes it 4KiB-aligned. `TDH.VP.INIT` points the virtualization exception information address of the
-TD VMCS at it. The first 34 bytes are architectural and defined by Intel SDM. The TDX module adds
-more fields after them, described below.
+TD VMCS at it. The first 34 bytes are architectural and defined by the Intel SDM. The TDX module
+adds more fields after them, described below.
 
 For a VMX guest, the CPU fills in the area when an EPT violation causes a `#VE`. For a TD, the CPU
 does the same for an EPT violation on shared memory. The TDX module fills in `VE_INFO` itself when
@@ -618,12 +605,12 @@ it injects a `#VE`. This happens for an EPT violation on private memory, and for
 module virtualizes on behalf of the TD, such as an MSR read (`EXIT_REASON` 31) or `CPUID`
 (`EXIT_REASON` 10).
 
-The TD cannot access `VE_INFO` directly, because the TDVPS is not accessible to it. Instead, it calls
-the `TDG.VP.VEINFO.GET` tdcall, which returns most `VE_INFO` fields in GPRs and clears `VALID`.
-`EPTP_INDEX` is not returned. The TD must call `TDG.VP.VEINFO.GET` before it can receive another
-`#VE`.
+The TD cannot access `VE_INFO` directly, because the TDVPS is not accessible to it. Instead, it
+calls the `TDG.VP.VEINFO.GET` tdcall, which returns most `VE_INFO` fields in GPRs and clears
+`VALID`. The TD must call `TDG.VP.VEINFO.GET` before it can receive another `#VE`.
 
-`EPTP_INDEX` is not relevant for TDs, because TDs cannot use EPTP switching (see [EPTP](#eptp)).
+`TDG.VP.VEINFO.GET` does not return `EPTP_INDEX`, because TDs cannot use EPTP switching (see
+[EPTP](#eptp)).
 
 ### TDX-Specific Fields
 
@@ -634,18 +621,18 @@ area. The TD reads both the architectural and the TDX-specific fields with the s
 - `INSTRUCTION_LENGTH` is the length of the instruction that caused the `#VE`. The handler adds it
   to `RIP` to resume past the instruction it just emulated.
 - `INSTRUCTION_INFORMATION` and `EXTENDED_INSTRUCTION_INFORMATION` describe the operands, such as
-  the registers and the address size, so that the `#VE` handler could emulate the operation.
+  the registers and the address size, so that the `#VE` handler can emulate the operation.
   `TDG.VP.VEINFO.GET` returns `EXTENDED_INSTRUCTION_INFORMATION` only with version 2, and only if
   `XFAM` enables APX.
-- The `CATEGORY` byte, which tells the TD what kind of event it is looking at. See
+- `CATEGORY` is a byte that tells the TD what kind of event it handles. See
   [#VE](tdx-misc.md#ve) for the values and their meaning.
 
 The instruction fields are defined only for a `#VE` caused by instruction execution, such as
 `CPUID`, `RDMSR` or `HLT`. They are not defined for an EPT violation (`EXIT_REASON` 48), and the
 `#VE` handler has to decode the faulting instruction itself.
 
-Support for `CATEGORY` is enumerated by `TDX_FEATURES0.VE_REDUCTION` (bit 30), and the TD gets it by
-calling `TDG.VP.VEINFO.GET` with version 1 or higher.
+Support for `CATEGORY` is enumerated by `TDX_FEATURES0.VE_REDUCTION` (bit 30). The TD obtains the
+byte by calling `TDG.VP.VEINFO.GET` with version 1 or higher.
 
 ---
 
@@ -655,8 +642,8 @@ calling `TDG.VP.VEINFO.GET` with version 1 or higher.
 controls. The TD can write `TD_CTLS` at run time with the `TDG.VM.WR` tdcall, and read it with
 `TDG.VM.RD`.
 
-The purpose of `TD_CTLS` is to let an enlightened TD say how much of the virtualization work it
-wants to do. Most of the bits trade paravirtualization for simplicity.
+The purpose of `TD_CTLS` is to let the TD specify how much virtualization work it handles itself.
+Most bits reduce the number of `#VE` events that the TD has to handle.
 
 ### TD_CTLS Bits
 
@@ -665,34 +652,34 @@ wants to do. Most of the bits trade paravirtualization for simplicity.
 | 0    | `PENDING_VE_DISABLE` | TD exit instead of `#VE(PENDING)` on a `PENDING` page.        |
 | 1    | `ENUM_TOPOLOGY`      | Virtual topology vs `#VE` on topology CPUID leaves and MSR.   |
 | 2    | `VIRT_CPUID2`        | `CPUID(0x2)` returns fixed values instead of `#VE`.           |
-| 3    | `REDUCE_VE`          | Greatly reduces `#VE` on `CPUID`, `RDMSR`, `WRMSR` and more.  |
+| 3    | `REDUCE_VE`          | Reduces `#VE` on `CPUID`, `RDMSR`, `WRMSR` and more.          |
 | 4    | `ENABLE_HW_KEYS`     | A migratable TD may use `TDG.MR.KEY.GET` unconditionally.     |
 | 62:5 | Reserved             | Must be 0.                                                    |
-| 63   | `LOCK`               | Locks all TD-writable virtualization controls.                |
+| 63   | `LOCK`               | Locks all virtualization controls writable by the TD.         |
 
 Additional comments.
 
-- Each bit is available only if the TDX module supports it, which the TD checks in
+- Bits are available only if the TDX module supports them, which the TD checks in
   [TDX_FEATURES0](#tdx_features0). If a feature is not supported, the corresponding bit must be 0.
 - `PENDING_VE_DISABLE` starts as a copy of `ATTRIBUTES.SEPT_VE_DISABLE`, and the TD may change it
   only if the VMM set `CONFIG_FLAGS.FLEXIBLE_PENDING_VE`. See [#VE](tdx-misc.md#ve) for how this
   affects access to `PENDING` pages.
-- `ENUM_TOPOLOGY` enables/disables `#VE` for `CPUID(0xB)`, `CPUID(0x1F)` and the
-  `IA32_X2APIC_APICID` MSR.
+- `ENUM_TOPOLOGY` selects between a virtual topology and `#VE` for `CPUID(0xB)`, `CPUID(0x1F)` and
+  the `IA32_X2APIC_APICID` MSR.
 - `ENABLE_HW_KEYS` lets a migratable TD use `TDG.MR.KEY.GET` regardless of
   `CONFIG_FLAGS.SEALING`.
-- `REDUCE_VE`'s main role is reducing `#VE`, but it has one unrelated role too: for sub-leaves 0
-  to 3 of the Cache Parameters leaf (`CPUID(0x4)`), it switches the source of the virtual value
-  from the TD's configured CPUID values to a native copy sampled at TD build time. `CPUID(0x4)`
-  never causes a `#VE`, with `REDUCE_VE` 0 or 1. Here, the bit just picks which value to return,
-  and has nothing to do with `#VE`.
+- The main role of `REDUCE_VE` is reducing `#VE`, but it has one unrelated role too. For sub-leaves
+  0 to 3 of the Cache Parameters leaf (`CPUID(0x4)`), it switches the source of the virtual value
+  from the CPUID values configured for the TD to a native copy sampled at TD build time.
+  `CPUID(0x4)` never causes a `#VE`, with `REDUCE_VE` 0 or 1. Here, the bit only picks which value
+  to return.
 - Setting `REDUCE_VE` implicitly sets `ENUM_TOPOLOGY` and `VIRT_CPUID2`.
 - `ENUM_TOPOLOGY`, and therefore `REDUCE_VE`, can be set only if the VMM configured a unique
   virtual x2APIC ID for every vCPU.
-- `LOCK` is a one-way door. Once set, `TD_CTLS`, [FEATURE_PARAVIRT_CTRL](#feature_paravirt_ctrl),
+- `LOCK` is irreversible. Once set, `TD_CTLS`, [FEATURE_PARAVIRT_CTRL](#feature_paravirt_ctrl),
   and the `CPUID_SUPERVISOR_VE`, `CPUID_USER_VE` and `CPUID_CONTROL` fields of [TDVPS](#tdvps)
   become read-only. The TD can use it to prevent its own software from changing the virtualization
-  contract it set up at boot.
+  configuration it set up at boot.
   - `CPUID_SUPERVISOR_VE` and `CPUID_USER_VE` are per-vCPU booleans that force an unconditional
     `#VE` on every `CPUID` execution at CPL 0 or CPL > 0 respectively. `CPUID_CONTROL` is a
     per-vCPU array with one 8-bit entry per CPUID leaf, offering the same two controls at
@@ -701,15 +688,14 @@ Additional comments.
 
 **Linux Notes**
 
-As of version 7.3, here is the logic the TDX guest Linux kernel follows for each `TD_CTLS` bit,
-early at boot.
+As of Linux 7.3, the TDX guest kernel follows this logic for each `TD_CTLS` bit, early at boot.
 
 - `PENDING_VE_DISABLE` (bit 0): if `CONFIG_FLAGS.FLEXIBLE_PENDING_VE` is set, write
   `PENDING_VE_DISABLE` with `TDG.VM.WR`. Otherwise, require `ATTRIBUTES.SEPT_VE_DISABLE` to already
   be set, and panic at boot if it is not.
-- Linux doesn't handle `#VE(PENDING)`. It tracks which memory the TD firmware left `PENDING` and
-  calls `TDG.MEM.PAGE.ACCEPT` before a page becomes usable, so the access does not fault. See
-  [#VE](tdx-misc.md#ve) for more details.
+  - Linux does not handle `#VE(PENDING)`. It tracks which memory the TD firmware left `PENDING`
+    and calls `TDG.MEM.PAGE.ACCEPT` before a page becomes usable, so the access does not fault. See
+    [#VE](tdx-misc.md#ve) for more details.
 - `ENUM_TOPOLOGY` (bit 1): set it only as a fallback, if setting `REDUCE_VE` fails.
 - `VIRT_CPUID2` (bit 2): do not set it directly. Get it as a side effect when `REDUCE_VE` succeeds.
 - `REDUCE_VE` (bit 3): set it unconditionally. This is the main switch Linux relies on.
@@ -721,17 +707,17 @@ early at boot.
 
 ## FEATURE_PARAVIRT_CTRL
 
-`TDCS.FEATURE_PARAVIRT_CTRL` is a [TDCS](#tdcs) field containing a bitmask with one bit per CPU
-feature, controlling whether the TD's access to that feature causes a `#VE`.
+`FEATURE_PARAVIRT_CTRL` is a bitmask in the [TDCS](#tdcs) with one bit per CPU feature. It controls
+whether TD access to that feature causes a `#VE`.
 
 - **0**: the TD sees the feature as absent. Its CPUID bits are forced to 0, and an MSR access
   gives `#GP(0)`.
 - **1**: the TD sees the feature the way the VMM configured it. Its CPUID bits reflect that
   configuration, and an MSR access may give `#VE(CONFIG_PARAVIRT)`.
 
-The TD itself controls these bits, writing `FEATURE_PARAVIRT_CTRL` at run time with `TDG.VM.WR`. It
-defaults to all zeros, and becomes usable only once `TD_CTLS.REDUCE_VE` is 1. It is useful to see
-this feature as a finer-grained control mechanism for handling `#VE` on top of `TD_CTLS.REDUCE_VE`.
+The TD controls these bits by writing `FEATURE_PARAVIRT_CTRL` at run time with `TDG.VM.WR`. The
+field defaults to all zeros and becomes usable only once `TD_CTLS.REDUCE_VE` is 1. It provides more
+detailed control of `#VE` handling on top of `TD_CTLS.REDUCE_VE`.
 
 The controlled features include `CORE_CAPABILITIES`, `MCA`, `MTRR`, `PCONFIG`, `RDT-A`, `RDT-M`,
 `DCA`, `EST`, `ACPI`, `TM2`, `TME` and `TSC_DEADLINE`.
@@ -743,32 +729,33 @@ The controlled features include `CORE_CAPABILITIES`, `MCA`, `MTRR`, `PCONFIG`, `
 `TDX_FEATURES0` is a 64-bit global metadata field that reports platform capabilities and features
 supported by the running TDX module. The TDX module sets it at initialization time.
 
-Here are some of the `TDX_FEATURES0` fields defined by the TDX module ABI. The list is not
+Here are some of the `TDX_FEATURES0` bits defined by the TDX module ABI. The list is not
 exhaustive.
 
-| Bit | Name                       | When Set                                                 |
-|-----|----------------------------|----------------------------------------------------------|
-| 0   | `TD_MIGRATION`             | Permits TD migration seamcalls and tdcalls.              |
-| 12  | `HW_SEALING`               | Permits setting `TD_CTLS.ENABLE_HW_KEYS`.                |
-| 14  | `ACT`                      | ACT platform.                                            |
-| 16  | `PENDING_EPT_VIOLATION_V2` | Permits setting `TD_CTLS.PENDING_VE_DISABLE`.            |
-| 17  | `FMS_CONFIG`               | Permits configuring `CPUID(0x1).EAX` for migratable TDs. |
-| 18  | `NO_RBP_MOD`               | Permits setting `CONFIG_FLAGS.NO_RBP_MOD`.               |
-| 20  | `TOPOLOGY_ENUM`            | Permits setting `TD_CTLS.ENUM_TOPOLOGY`.                 |
-| 27  | `MAXPA_VIRT`               | Permits setting `CONFIG_FLAGS.MAXPA_VIRT`.               |
-| 29  | `CPUID2_VIRT`              | Permits setting `TD_CTLS.VIRT_CPUID2`.                   |
-| 30  | `VE_REDUCTION`             | Permits setting `TD_CTLS.REDUCE_VE` and `FEATURE_PARAVIRT_CTRL`. |
+| Bit | Name                       | When Set                                                |
+|-----|----------------------------|---------------------------------------------------------|
+| 0   | `TD_MIGRATION`             | Allows TD migration seamcalls and tdcalls.              |
+| 12  | `HW_SEALING`               | Allows `TD_CTLS.ENABLE_HW_KEYS`.                        |
+| 14  | `ACT`                      | ACT platform.                                           |
+| 16  | `PENDING_EPT_VIOLATION_V2` | Allows `TD_CTLS.PENDING_VE_DISABLE`.                    |
+| 17  | `FMS_CONFIG`               | Allows configuring `CPUID(0x1).EAX` for migratable TDs. |
+| 18  | `NO_RBP_MOD`               | Allows `CONFIG_FLAGS.NO_RBP_MOD`.                       |
+| 20  | `TOPOLOGY_ENUM`            | Allows `TD_CTLS.ENUM_TOPOLOGY`.                         |
+| 27  | `MAXPA_VIRT`               | Allows `CONFIG_FLAGS.MAXPA_VIRT`.                       |
+| 29  | `CPUID2_VIRT`              | Allows `TD_CTLS.VIRT_CPUID2`.                           |
+| 30  | `VE_REDUCTION`             | Allows `TD_CTLS.REDUCE_VE` and `FEATURE_PARAVIRT_CTRL`. |
+| 63  | `TDX_FEATURES1_VALID`      | `TDX_FEATURES1` is valid.                               |
 
 For the `ACT` bit, 0 means a non-ACT platform and 1 means an ACT platform. See
 [ACT vs Non-ACT Mechanisms](../../2026/tdx-hw-layers.md#act-vs-non-act-mechanisms) for more
 information.
 
-`TDX_FEATURES0` can be read by VMM using the `TDH.SYS.RD` seamcall, and by TD using the `TDG.SYS.RD`
-seamcall. But it cannot be modified by either the VMM or the TD.
+The VMM can read `TDX_FEATURES0` with the `TDH.SYS.RD` seamcall, and the TD can read it with the
+`TDG.SYS.RD` tdcall. Neither the VMM nor the TD can modify it.
 
 `TDX_FEATURES0` influences [ATTRIBUTES](#attributes), [XFAM](#xfam) and
-[CONFIG_FLAGS](#config_flags), but indirectly. It shapes the contents of their `*_FIXED0`/`*_FIXED1`
-fields (e.g., `XFAM_FIXED0`), which is what decides the allowed bit combinations.
+[CONFIG_FLAGS](#config_flags), but indirectly. It shapes the contents of their `*_FIXED0` and
+`*_FIXED1` fields (e.g., `XFAM_FIXED0`), which is what decides the allowed bit combinations.
 
 ---
 
@@ -779,11 +766,11 @@ supported by the running TDX module, similar to [TDX_FEATURES0](#tdx_features0).
 
 `TDX_FEATURES1` is valid only if `TDX_FEATURES0.TDX_FEATURES1_VALID` (bit 63) is set.
 
-Here are some of the `TDX_FEATURES1` fields defined by the TDX module ABI. The list is not
+Here are some of the `TDX_FEATURES1` bits defined by the TDX module ABI. The list is not
 exhaustive.
 
 | Bit | Name                         | When Set                                               |
 |-----|------------------------------|--------------------------------------------------------|
 | 0   | `MEM_SCAN_ENHANCEMENTS1`     | `TDH.MEM.SCAN.COMP` reports GPA details on errors.     |
-| 2   | `PREUPDATE`                  | Permits calling `TDH.SYS.PREUPDATE`.                   |
+| 2   | `PREUPDATE`                  | Allows calling `TDH.SYS.PREUPDATE`.                    |
 | 4   | `TD_MIGRATION_ENHANCEMENTS1` | Multiple enhancements for TD live migration.           |

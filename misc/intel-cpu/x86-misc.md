@@ -3,7 +3,7 @@
 - **Author**: Artem Bityutskiy
 - **Version**: 0.1
 - **Date**: 2026-07-13
-- **Last updated**: 2026-10-17
+- **Last updated**: 2026-10-22
 
 **Disclaimer**: This document reflects my current understanding of various Intel CPU concepts and
 mechanisms, but it may contain errors or omissions. It is not an official Intel document and should
@@ -24,7 +24,7 @@ architecture, intended for reference from my other documents.
   - [Memory Cache Control](#memory-cache-control)
     - [MTRRs](#mtrrs)
     - [PAT](#pat)
-    - [Non-VM Access](#non-vm-access)
+    - [Non-VM Accesses](#non-vm-accesses)
     - [EPT Memory Type](#ept-memory-type)
     - [VM Accesses](#vm-accesses)
   - [XSAVE and State Components](#xsave-and-state-components)
@@ -56,8 +56,8 @@ so linear and virtual addresses refer to the same address.
 
 ## GLA and GVA
 
-**GLA** (Guest Linear Address) is the Intel term for a guest [linear
-address](#linear-and-virtual-addresses). The SDM uses it, for example, in VMCS field names.
+**GLA** (Guest Linear Address) is the Intel term for a guest
+[linear address](#linear-and-virtual-addresses). The SDM uses it, for example, in VMCS field names.
 
 **GVA** (Guest Virtual Address) is the generic term used by other architectures and operating system
 documentation. With flat segmentation, GLA and GVA refer to the same address. Paging translates it
@@ -83,8 +83,7 @@ model.
       of whether the address is the same or different.
   - **Speculative processor ordering**:
     - Load vs load: loads are observed in instruction order.
-    - Store vs store: stores become visible in instruction order (but there are exceptions, see
-      below).
+    - Store vs store: stores become visible in instruction order (with exceptions, see Note 1).
     - Load vs store:
       - Load followed by store: the store never becomes visible before the load is observed.
       - Store followed by load, same address: the load always returns the value written by the
@@ -102,13 +101,13 @@ model.
 
 The Intel SDM defines the following memory types:
 
-| Type | Name            | Cacheable  | Write-back | Spcl loads | Ordering model                 |
-|------|-----------------|------------|------------|------------|--------------------------------|
-| UC   | Uncacheable     | No         | No         | No         | Strong ordering                |
-| WC   | Write combining | No         | No         | Yes        | Weak ordering                  |
-| WP   | Write protected | Reads only | No         | Yes        | Speculative processor ordering |
-| WT   | Write through   | Yes        | No         | Yes        | Speculative processor ordering |
-| WB   | Write back      | Yes        | Yes        | Yes        | Speculative processor ordering |
+| Type | Name            | Cacheable  | Write-back | Spec. loads | Ordering model                 |
+|------|-----------------|------------|------------|-------------|--------------------------------|
+| UC   | Uncacheable     | No         | No         | No          | Strong ordering                |
+| WC   | Write combining | No         | No         | Yes         | Weak ordering                  |
+| WP   | Write protected | Reads only | No         | Yes         | Speculative processor ordering |
+| WT   | Write through   | Yes        | No         | Yes         | Speculative processor ordering |
+| WB   | Write back      | Yes        | Yes        | Yes         | Speculative processor ordering |
 
 **Linux examples**:
 
@@ -138,8 +137,7 @@ more information.
 
 ## Memory Cache Control
 
-There are 3 mechanisms that control what [memory type](#memory-types) applies to a given memory
-access.
+Three mechanisms control which [memory type](#memory-types) applies to a given memory access.
 
 - **MTRRs**: per physical address range control.
 - **PAT**: per [linear address](#linear-and-virtual-addresses) control.
@@ -169,7 +167,7 @@ The **PAT** (Page Attribute Table) lets the OS select a memory type for each pag
 its page table entries. Unlike MTRRs, which assign memory types to physical address ranges, PAT
 assigns them per linear address mapping.
 
-The `IA32_PAT` MSR (0x277) contains eight 8-bit fields (`PA0` - `PA7`). Each field encodes one
+The `IA32_PAT` MSR (0x277) contains eight 8-bit fields (`PA0`-`PA7`). Each field encodes one
 memory type.
 
 Page table entries include the `PAT`, `PCD`, and `PWT` bits. `PCD` means page-level cache disable,
@@ -179,10 +177,10 @@ bit 7 in a 4KiB page table entry and bit 12 in an entry for a larger page.
 Together, `PAT`, `PCD`, and `PWT` form a 3-bit index that selects one of the eight `IA32_PAT`
 fields. `PAT` is the high bit, `PCD` the middle bit, and `PWT` the low bit.
 
-### Non-VM Access
+### Non-VM Accesses
 
-This subsection covers how MTRR and PAT combine for non-VM memory accesses. VM access uses a
-different mechanism and is covered later in this section.
+This subsection covers how MTRR and PAT combine for non-VM memory accesses. VM accesses use a
+different mechanism and are covered later in this section.
 
 For non-VM accesses, the CPU combines the MTRR type for the physical address with the PAT type
 selected by the page table entry. The combination depends on two cache-control bits in `CR0`:
@@ -205,27 +203,27 @@ model.
   - **WT**: write through to memory on every store, speculative processor ordering.
   - **WB**: write back normally, speculative processor ordering.
 
-The order within each group is not random either. It roughly ranks how much caching is actually
-involved, from UC, which is sort of nothing, to WB, which is all of it. This is more of an intuition
-than a strict rule, so take it with a grain of salt.
+The order within each group also follows an intuition. It tracks how much caching is involved, from
+UC, which uses no caching, to WB, which uses full caching. This is only an intuition, not a strict
+rule.
 
-In general, PAT takes precedence over MTRR. The first set of exceptions arises when PAT asks for
-caching that MTRR does not support. Here they are, with my intuition behind them.
+In general, PAT takes precedence over MTRR. PAT UC and PAT WC need no caching support from MTRR,
+so they always win.
 
-- PAT UC and PAT WC do not need MTRR to support any caching, so they always win outright.
-- PAT WP and PAT WT do use the cache, but MTRR UC and MTRR WC do not support that, so the effective
-  type is forced to UC. Intuition: WC (weak ordering) lets stores be delayed and combined, while WP
-  and WT do not. So UC (strong ordering) is the safer choice.
+The first exception arises when PAT requests caching that MTRR does not support. PAT WP and PAT WT
+use the cache, but MTRR UC and MTRR WC do not support that, so the effective type is UC. The
+intuition is that WC (weak ordering) lets stores be delayed and combined, while WP and WT do not.
+UC (strong ordering) is therefore the safer choice.
 
-PAT WB is a separate exception. It never takes precedence, and for any MTRR type the effective type
-is the MTRR type. I cannot offer a simple intuition for this case. For me it is just an Intel CPU
+PAT WB is the second exception. It never takes precedence, and for any MTRR type the effective type
+is the MTRR type. I cannot offer a simple intuition for this case, so I treat it as an Intel CPU
 quirk.
 
-PAT UC- is yet another exception. It resolves to either UC or WC depending on the MTRR type, but
-there is no simple intuition I can offer for it. The SDM notes that some of these combinations were
-left undefined in the past. So I just consider it another Intel CPU quirk.
+PAT UC- is the third exception. It resolves to either UC or WC depending on the MTRR type. I cannot
+offer a simple intuition for it either. The SDM notes that some of these combinations were left
+undefined in the past, so I treat it as another Intel CPU quirk.
 
-Here is the complete combination table from Intel SDM.
+Here is the complete combination table from the Intel SDM.
 
 | MTRR type / PAT type  | UC | UC- | WC | WP | WT | WB |
 |-----------------------|----|-----|----|----|----|----|
@@ -254,8 +252,8 @@ memory type. Two translation steps are involved.
 Bit 6 of the final EPT entry is called `Ignore PAT memory type`:
 
 - If the bit is 1, the CPU uses the EPT type alone, ignoring the VM PAT type entirely.
-- If the bit is 0, the CPU combines the EPT and VM PAT types using the same
-  matrix as for [non-VM accesses](#non-vm-access), but instead of MTRR type, the EPT type is used.
+- If the bit is 0, the CPU combines the EPT and VM PAT types using the same matrix as for
+  [non-VM accesses](#non-vm-accesses), but the EPT type replaces the MTRR type.
 
 ---
 
@@ -346,7 +344,7 @@ describes state component *i*.
 | 0        | `EDX:EAX` | Bitmap of the supported user components. Bits settable in `XCR0`.   |
 | 0        | `EBX`     | XSAVE area size for the components currently enabled in `XCR0`.     |
 | 0        | `ECX`     | XSAVE area size for all supported user components.                  |
-| 1        | `EAX`     | Which XSAVE feature set extensions the CPU supports.                |
+| 1        | `EAX`     | XSAVE feature set extensions supported by the CPU.                  |
 | 1        | `EBX`     | `XSAVES` area size for the components enabled in `XCR0`+`IA32_XSS`. |
 | 1        | `EDX:ECX` | Bitmap of supported supervisor components. Settable in `IA32_XSS`.  |
 | *i*      | `EAX`     | Size in bytes of state component *i*.                               |
@@ -378,19 +376,19 @@ subset of the enabled components when calling `XSAVE`, `XRSTOR`, `XSAVES`, or `X
 
 ## EPTP
 
-The **EPTP** (Extended Page Table Pointer) is the VMCS field that points at the root of the EPT
+The **EPTP** (Extended Page Table Pointer) is the VMCS field that points to the root of the EPT
 tree the CPU walks to translate a GPA into an HPA. Besides the root pointer it carries a few
 controls for the walk itself.
 
-| Bits  | Field                   | Meaning                                                   |
-|-------|-------------------------|-----------------------------------------------------------|
-| 2:0   | Memory type             | Memory type for accessing the EPT structures: 0 is UC, 6 is WB. |
-| 5:3   | EPT depth               | One less than the EPT levels: 3 is 4-level, 4 is 5-level.       |
-| 6     | Accessed and dirty      | Enables the accessed and dirty flags in EPT entries.            |
-| 7     | Supervisor shadow stack | Enables supervisor shadow stack access rights.                  |
-| 11:8  | Reserved                | Must be 0.                                                      |
-| 51:12 | Root HPA                | HPA of the top-level EPT page, 4KiB aligned.                    |
-| 63:52 | Reserved                | Must be 0.                                                      |
+| Bits  | Field                   | Meaning                                                    |
+|-------|-------------------------|------------------------------------------------------------|
+| 2:0   | Memory type             | Memory type for EPT structure accesses: 0 is UC, 6 is WB.  |
+| 5:3   | EPT depth               | One less than the EPT levels: 3 is 4-level, 4 is 5-level.  |
+| 6     | Accessed and dirty      | Enables the accessed and dirty flags in EPT entries.       |
+| 7     | Supervisor shadow stack | Enables supervisor shadow stack access rights.             |
+| 11:8  | Reserved                | Must be 0.                                                 |
+| 51:12 | Root HPA                | HPA of the top-level EPT page, 4KiB aligned.               |
+| 63:52 | Reserved                | Must be 0.                                                 |
 
 The root HPA occupies bits MAXPHYADDR-1:12. The table assumes a MAXPHYADDR of 52. With a smaller
 MAXPHYADDR, the bits from MAXPHYADDR to 51 are reserved too.
@@ -400,17 +398,16 @@ MAXPHYADDR, the bits from MAXPHYADDR to 51 are reserved too.
 **EPTP Switching** lets the VMM prepare a list of up to 512 EPTPs, from which the guest picks one
 with the `VMFUNC` instruction, without a [VM exit](tdx-misc.md#vm-exit-and-td-exit).
 
-Each EPTP is a different view of guest memory, with its own mappings and permissions. It is designed
-for things like security agents running inside the guest, which switch views depending on the
-situation.
+Each EPTP is a different view of guest memory, with its own mappings and permissions. The feature
+targets use cases such as security agents running inside the guest, which switch views depending on
+the situation.
 
-**Linux Note**: The Linux kernel does not use EPTP switching for its own VMX guests, so a VMX guest
-running directly on KVM cannot switch EPTs. But KVM does support the feature for nested
-virtualization, where the guest of KVM is itself a hypervisor and wants to offer EPTP switching to
-its own guests. KVM emulates it in software: it leaves the hardware feature disabled, so `VMFUNC` in
-the nested guest causes a VM exit to KVM, and KVM reads the requested EPTP from the list and
-switches the mappings itself. The nested guest sees the architectural behavior, but pays for a VM
-exit anyway.
+**Linux Note**: KVM does not expose EPTP switching to VMX guests running directly on it, so these
+guests cannot switch EPTs. KVM supports the feature for nested virtualization, where the guest of
+KVM is itself a hypervisor that offers EPTP switching to its own guests. KVM emulates it in
+software: it leaves the hardware feature disabled, so `VMFUNC` in the nested guest causes a VM
+exit to KVM. KVM then reads the requested EPTP from the list and switches the mappings. The nested
+guest sees the architectural behavior, but each switch still incurs a VM exit.
 
 ---
 
@@ -419,37 +416,37 @@ exit anyway.
 The **virtualization exception information area** is a memory area that carries the details of a
 [#VE](tdx-misc.md#ve). TDX specifications call it `VE_INFO`, and this section uses the same name.
 It is per vCPU, and the VMCS of the vCPU holds its physical address. The first 34 bytes are
-architectural, and whoever raises the `#VE` fills them in: the CPU for an EPT violation, or software
-that injects a `#VE`, such as the TDX module (see [VE_INFO](tdx-structs.md#ve_info)).
+architectural, and the component that raises the `#VE` fills them in: the CPU for an EPT violation,
+or software that injects a `#VE`, such as the TDX module (see [VE_INFO](tdx-structs.md#ve_info)).
 
-Intel SDM requires the `VE_INFO` address to be 4KiB-aligned, but does not require the area to be of
-any certain size.
+The Intel SDM requires the `VE_INFO` address to be 4KiB aligned, but does not define a size for the
+area.
 
-**Linux Note**: KVM does not use `#VE` for VMX guests. It enables EPT-violation `#VE` only with the
-`CONFIG_KVM_INTEL_PROVE_VE` debug option, which intercepts every `#VE` and warns about it, to check
-that KVM never lets a guest receive one. In this case, KVM allocates a 4KiB page per vCPU for
-`VE_INFO`, defines only the architectural fields, and never uses the rest of the page.
+**Linux Note**: KVM does not use `#VE` for VMX guests. It enables the `#VE` for EPT violations only
+with the `CONFIG_KVM_INTEL_PROVE_VE` debug option, which intercepts every `#VE` and warns about it,
+to check that KVM never lets a guest receive one. With this option, KVM allocates a 4KiB page per
+vCPU for `VE_INFO`, defines only the architectural fields, and never uses the rest of the page.
 
-`EXIT_REASON`, `EXIT_QUALIFICATION`, `GLA` and `GPA` hold the values that would have gone into the
+`EXIT_REASON`, `EXIT_QUALIFICATION`, `GLA`, and `GPA` hold the values that would have gone into the
 VMCS if a VM exit had happened instead of the `#VE`.
 
-| Offset | Field                | Meaning                                                        |
-|--------|----------------------|----------------------------------------------------------------|
-| 0      | `EXIT_REASON`        | The VM exit reason, e.g., EPT violation (48) or MSR read (31). |
-| 4      | `VALID`              | 0 means `VE_INFO` is free, 0xFFFFFFFF means it holds a `#VE`.  |
-| 8      | `EXIT_QUALIFICATION` | Exit qualification value.                                      |
-| 16     | `GLA`                | Guest linear address.                                          |
-| 24     | `GPA`                | Guest physical address.                                        |
-| 32     | `EPTP_INDEX`         | Current EPTP index VM-execution control.                       |
+| Offset | Field                | Meaning                                                          |
+|--------|----------------------|------------------------------------------------------------------|
+| 0      | `EXIT_REASON`        | The VM exit reason, such as EPT violation (48) or MSR read (31). |
+| 4      | `VALID`              | 0 means `VE_INFO` is free, 0xFFFFFFFF means it holds a `#VE`.    |
+| 8      | `EXIT_QUALIFICATION` | Exit qualification value.                                        |
+| 16     | `GLA`                | Guest linear address.                                            |
+| 24     | `GPA`                | Guest physical address.                                          |
+| 32     | `EPTP_INDEX`         | Index of the active EPTP in the EPTP list.                       |
 
-`EXIT_REASON` tells what caused the `#VE`. In case of an EPT violation the CPU raises the `#VE` and
-writes 48, which is the only value the CPU ever writes. But a `#VE` can also be injected by
-software, and then the value is the reason of the operation the software virtualized, such as MSR
-read (31) or `CPUID` (10).
+`EXIT_REASON` tells what caused the `#VE`. For an EPT violation, the CPU raises the `#VE` and writes
+48. This is the only value the CPU writes. But a `#VE` can also be injected by software, and then
+the value is the exit reason of the operation the software virtualized, such as MSR read (31) or
+`CPUID` (10).
 
-`VALID` marks the `VE_INFO` area as "occupied". Whoever raises the `#VE` sets it to 0xFFFFFFFF, and
-the guest writes 0 back when it is done. While `VALID` is not 0, an EPT violation causes a VM exit
-instead of a `#VE`.
+`VALID` marks the `VE_INFO` area as "occupied". The component that raises the `#VE` sets it to
+0xFFFFFFFF, and the guest writes 0 back when it is done. While `VALID` is not 0, an EPT violation
+causes a VM exit instead of a `#VE`.
 
 `EXIT_QUALIFICATION` carries extra details, and its meaning depends on `EXIT_REASON`. For an EPT
 violation it includes whether the access was a read, a write, or an instruction fetch, and several

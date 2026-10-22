@@ -49,7 +49,7 @@ The TDX module specification defines two page modification tracking mechanisms:
   [SEPT Page States](tdx-misc.md#sept-page-states)).
 - **Write-blocking export** (TDX spec name: Write-Blocking Based Memory Export): blocks a page for
   writing before exporting it. A TD write to the page causes an EPT violation TD exit, and the VMM
-  is expected to unblock the page, and later block and re-export it. This mode is outside the scope
+  is expected to unblock the page and later block and re-export it. This mode is outside the scope
   of this document.
 
 The choice between the two modes is a TDX module configuration parameter that the VMM selects
@@ -76,10 +76,10 @@ transferred, and the start token is generated and imported. The TDX module does 
 ordering during this phase because the source TD is paused and cannot dirty pages anymore. This
 allows the destination to start execution while remaining memory pages are delivered on demand.
 
-**Note**: for a TD configured with TDX Connect, only the in-order phase is supported. Every TD
+**Note**: For a TD configured with TDX Connect, only the in-order phase is supported. Every TD
 private page must be exported during the in-order phase, before `TDH.EXPORT.TRACK` generates the
 start token. The out-of-order phase relies on a CPU access faulting on a missing page in the
-destination TD to fetch it on demand. A TDI cannot fault, so a DMA to a missing page simply fails.
+destination TD to fetch it on demand. A TDI cannot fault, so a DMA to a missing page fails.
 There is no mechanism to deliver pages on demand for TDIs attached to the destination.
 
 ## Enumeration
@@ -90,8 +90,7 @@ registers, read with `TDH.SYS.RD` (by the VMM) or `TDG.SYS.RD` (by the TD).
 
 ### Individual Features
 
-Here are the individual features enumerated by
-[TDX_FEATURES0](tdx-structs.md#tdx_features0).
+[TDX_FEATURES0](tdx-structs.md#tdx_features0) enumerates the following individual features:
 
 - `TD_MIGRATION` (bit 0) indicates that the TDX module supports TD migration.
 - `FMS_CONFIG` (bit 17) indicates support for configuring the virtual `CPUID(0x1).EAX` value, which
@@ -126,8 +125,7 @@ Here are the individual features enumerated by
 **Enhanced import** is a set of TDX module capabilities for TD state import seamcalls. These
 capabilities are available when `TDX_FEATURES0.ENHANCED_IMPORT` (bit 60) is set.
 
-When a TDX module supports enhanced import, the following features become available during
-import.
+When a TDX module supports enhanced import, the following features become available during import:
 
 - **Pre-allocation**: pre-populate the destination TD with physical pages before their content is
   imported.
@@ -137,20 +135,19 @@ import.
   in-order import phase.
 - **NO_REOWN**: forbid a physical page from changing ownership between the VMM and the TD during
   import.
-- **Partial GPA list processing**: let `TDH.IMPORT.MEM` process only part of a migration bundle's
-  GPA list per invocation.
+- **Partial GPA list processing**: let `TDH.IMPORT.MEM` process only part of the GPA list of a
+  migration bundle per invocation.
 
 #### Pre-Allocation
 
 The `TDH.MEM.PAGE.AUG` seamcall can pre-populate the destination TD with physical pages before
-their content is imported. The pages start in the
-[PENDING](tdx-misc.md#sept-page-states) state. `TDH.IMPORT.MEM` then imports the migrated pages into
-these pre-allocated pages and updates the SEPT entries to the states recorded in the
-GPA list entries of the migration bundle.
+their content is imported. The pages start in the [PENDING](tdx-misc.md#sept-page-states) state.
+`TDH.IMPORT.MEM` then imports the migrated pages into these pre-allocated pages and updates the
+SEPT entries to the states recorded in the GPA list entries of the migration bundle.
 
-Note, `TDH.MEM.PAGE.ADD` is prohibited, since the destination TD never goes through the normal
-build flow. `TDH.IMPORT.STATE.IMMUTABLE` starts the import session directly from the TD's
-`UNINITIALIZED` `OP_STATE`, bypassing the state in which `TDH.MEM.PAGE.ADD` is allowed.
+Note that `TDH.MEM.PAGE.ADD` is prohibited because the destination TD never goes through the normal
+build flow. `TDH.IMPORT.STATE.IMMUTABLE` starts the import session directly from the `UNINITIALIZED`
+`OP_STATE` of the TD, bypassing the state in which `TDH.MEM.PAGE.ADD` is allowed.
 
 #### Page Removal
 
@@ -178,12 +175,12 @@ between the VMM and the TD during the seamcall.
 
 A physical page is either:
 
-- TD-owned: private, encrypted with the TD's HKID, mapped by a SEPT entry
+- TD-owned: private, encrypted with the HKID of the TD, mapped by a SEPT entry.
 - VMM-owned: regular host memory.
 
-Each incoming [GPA list](tdx-migration-structs.md#gpa-list) entry carries an
-[OPERATION](tdx-migration-structs.md#gpa-list-entry-operation-values) field.  Without `NO_REOWN`,
-each operation can change page ownership:
+Incoming [GPA list](tdx-migration-structs.md#gpa-list) entries carry an
+[OPERATION](tdx-migration-structs.md#gpa-list-entry-operation-values) field. Without `NO_REOWN`,
+operations can change page ownership:
 
 - `MIGRATE` converts a VMM-owned page to a TD-owned page. The page comes from the destination page
   list, or the migration buffer itself is converted (in-place import). If the page was already
@@ -209,10 +206,10 @@ operation accepts and requires:
 With partial GPA list processing, the VMM controls how many GPA list entries of a migration bundle
 `TDH.IMPORT.MEM` processes in each run, rather than the whole bundle at once.
 
-The VMM sets `GPA_LIST_INFO.LAST_ENTRY` to the last entry to process in the current run. If it is
-before the end of the bundle GPA list, `TDH.IMPORT.MEM` returns `TDX_INTERRUPTED_LIST_END` and the
-VMM resumes it later with a higher `LAST_ENTRY`.
+The VMM sets `GPA_LIST_INFO.LAST_ENTRY` to the last entry to process in the current run. If
+`LAST_ENTRY` is before the end of the GPA list of the bundle, `TDH.IMPORT.MEM` returns
+`TDX_INTERRUPTED_LIST_END` and the VMM resumes it later with a higher `LAST_ENTRY`.
 
-**Note**: `TDH.EXPORT.MEM` has no equivalent. There, `GPA_LIST_INFO.FIRST_ENTRY` and `LAST_ENTRY`
-select the range of GPA list entries to export, and each new invocation produces a new migration
-bundle with its own MBMD.
+**Note**: `TDH.EXPORT.MEM` handles the range differently. `GPA_LIST_INFO.FIRST_ENTRY` and
+`LAST_ENTRY` select the range of GPA list entries to export, and invocations produce new migration
+bundles, each with its own MBMD.

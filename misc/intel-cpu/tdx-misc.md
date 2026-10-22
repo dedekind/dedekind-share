@@ -682,8 +682,9 @@ Live migration adds more `OP_STATE` values. On the source TD:
   can still run.
 - `LIVE_EXPORT`: entered when `TDH.EXPORT.STATE.IMMUTABLE` completes. The TD can still run while
   memory is exported.
-- `PAUSED_EXPORT`: entered by `TDH.EXPORT.PAUSE`. No vCPU may run. Mutable TD and vCPU state is
-  exported with `TDH.EXPORT.STATE.TD` and `TDH.EXPORT.STATE.VP`, and memory export continues.
+- `PAUSED_EXPORT`: entered by `TDH.EXPORT.PAUSE`. No vCPU may run.
+  [TD mutable state](tdx-migration-structs.md#td-mutable-state) and vCPU state are exported with
+  `TDH.EXPORT.STATE.TD` and `TDH.EXPORT.STATE.VP`, and memory export continues.
 - `POST_EXPORT`: entered once the start token has been exported with `TDH.EXPORT.TRACK`. The TD
   cannot run anymore, but the destination may already be running and requesting remaining pages on
   demand ([post-copy](tdx-migration-misc.md#migration-phases)), so memory can still be exported.
