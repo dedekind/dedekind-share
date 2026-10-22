@@ -9,6 +9,8 @@
   of "device-state" when the meaning is clear. Preserve established terms such as P-state.
 - Prefer to avoid the possessive 's when a rephrase reads well. Write "the TDVPR page of the vCPU"
   instead of "the vCPU's TDVPR page". This is a preference, not a hard rule.
+- Prefer plural subjects for general statements. Write "Metadata pages contain" instead of "Each
+  metadata page contains". This is a preference, not a hard rule.
 - State the exact component, event, condition, or behavior.
 - Avoid filler words such as "generally", "basically", "roughly", "seems", or
   "typically" unless the statement is truly uncertain.
@@ -17,6 +19,16 @@
   new wording.
 - Do not invent new terms unless the project already uses them or the term is necessary for
   clarity.
+
+# Paragraph Structure
+
+- Write one idea per paragraph. Multiple ideas are fine only if they are very closely related.
+- Keep paragraphs short. The preferred maximum is 7 lines of up to 100 characters each. Split
+  longer paragraphs, usually at an idea boundary.
+- Bridge paragraphs. A paragraph should not switch topics abruptly. Start it with a sentence that
+  links to the previous one, or end the previous one with a pointer to the next topic.
+- Bridging is not always possible or needed. Skip it when adjacent paragraphs discuss very related
+  things.
 
 # Markdown Style
 
