@@ -95,20 +95,19 @@ It is important to understand two things about this document:
   rather than reading like a reference manual.
 - This is not about Linux TDX guest live migration support. It is about the live migration model
   offered by the Intel TDX module and is written in an OS-agnostic way. But because my practical
-  context is Linux, it includes some Linux-specific notes and focuses on the aspects relevant to the
+  context is Linux, it includes some Linux-specific notes and focuses on the aspects relevant to our
   initial TDX live migration Linux implementation.
 
 The document assumes that the reader is familiar with live migration in general, for example, the
 difference between pre-copy and post-copy migration. If it helps, here is my study of
-[QEMU/KVM](./qemu-live-migration.md) for traditional VMs.
+[QEMU/KVM live migration](./qemu-live-migration.md) for traditional VMs.
 
 This document is not a complete TDX live migration reference. For example, the following aspects are
 not covered yet:
 
-- [Post-copy migration](../misc/intel-cpu/tdx-migration-misc.md#pre-copy-vs-post-copy-migration).
+- TDX post-copy live migration.
 - Migration of partitioned TDs.
-- Write-protect dirty tracking (TDX term:
-  [Write-Blocking Based Memory Export](../misc/intel-cpu/tdx-migration-misc.md#non-blocking-vs-write-blocking-export)).
+- Write-protect dirty tracking (TDX term: Write-Blocking Based Memory Export).
 
 This document is evolving over time, and I increment the version number after significant updates.
 
@@ -728,9 +727,6 @@ The VMM uses the same `DSCAN` invocation for the first scan and later scans. On 
 every currently mapped private TD page is still unexported, so `DSCAN` reports all of them as export
 candidates, regardless of whether they are dirty or clean. On later scans, `DSCAN` reports only
 pages that changed since their earlier export.
-
-A `REEXPORT` qualifier makes `DSCAN` skip the pages that were never exported, even on the first
-scan. This document assumes the default behavior described above.
 
 ---
 
