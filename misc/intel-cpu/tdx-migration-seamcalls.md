@@ -823,20 +823,17 @@ Whether the seamcall exports data, and what metadata it produces, depends on the
   cancel the earlier import of the page. The SEPT state is `EXPORTED_REMOVED`, `EXPORTED_BLOCKED`,
   or `PENDING_EXPORTED_BLOCKED`.
 
-The seamcall also updates the [migration counters](tdx-migration-structs.md#migration-counters).
-`MIGRATE` increments `MIG_COUNT`, and `CANCEL` decrements it. `REMIGRATE` and `CANCEL` decrement
-`DIRTY_COUNT`, because they process a page that the counter included.
-
-`DSCAN` changes SEPT entries, because it clears the Dirty bit. To make the change visible to the
-vCPUs, the VMM must run the [TLB tracking](tdx-misc.md#tlb-tracking) protocol after the scan.
-
-`TDH.EXPORT.MEM` verifies that the VMM ran the protocol after the scan, using the
-[scan epoch](tdx-misc.md#scan-epoch) that `DSCAN` or `PRECHECK` recorded. The check applies only
-while the TD is running, not when it is paused.
-
 The seamcall can also skip a page, for example because the page was written after `DSCAN` scanned
 it, or because a concurrent operation holds its SEPT entry. The `STATUS` field of the GPA list entry
 tells the reason, see below.
+
+`DSCAN` changes SEPT entries, because it clears the Dirty bit. To make the change visible to the
+vCPUs, the VMM must run the [TLB tracking](tdx-misc.md#tlb-tracking) protocol after the scan and
+before exporting the reported pages.
+
+`TDH.EXPORT.MEM` verifies that the VMM ran the protocol, using the
+[scan epoch](tdx-misc.md#scan-epoch) that `DSCAN` or `PRECHECK` recorded. The check applies only
+while the TD is running, not when it is paused.
 
 ### Input Arguments
 
@@ -892,9 +889,10 @@ count the pages of HPA list entries with the `INVALID` flag (bit 63) set, becaus
 exported no data to them.
 
 **Note**: `INVALID` is a flag of an HPA list entry, not of a GPA list entry. The seamcall sets it
-when it exports no page for an entry, for example for a pending page or a cancellation. Even though
-no data page is used, the GPA list entry still carries the page metadata (`OPERATION` and `STATUS`).
-It is part of the bundle and the destination imports it.
+for every entry that exports no data page, for example a pending page, a cancellation, a skipped
+entry, or an entry with an error in `STATUS`. The page that the HPA list entry points to stays
+unused. The GPA list entry carries the page metadata (`OPERATION` and `STATUS`). Unlike the HPA
+list, the GPA list is part of the bundle and the destination imports it.
 
 ### GPA List Entry Fields
 
@@ -934,6 +932,14 @@ The seamcall writes the following fields back:
 - `STATUS` (bits 60:56): The result of processing the entry, such as success, skipped, or error.
   More details below.
 - `STATE` (bits 4:3): Always 0, which has no meaning here. `TDH.IMPORT.MEM` expects 0 on input.
+
+**Note**: The seamcall updates the
+[migration counters](tdx-migration-structs.md#migration-counters) based on the operation:
+
+- `MIG_COUNT`: Incremented by `MIGRATE` and decremented by `CANCEL`.
+- `DIRTY_COUNT`: Decremented by `REMIGRATE` and `CANCEL`, because they process exported pages that
+  changed after their export. `MIGRATE` does not decrement it, because the page has no earlier
+  export that could be outdated.
 
 #### Cancellation
 
@@ -978,9 +984,13 @@ The notable `STATUS` values of a GPA list entry are:
   management operation overwrote it after the scan, for example the VMM blocked and then unblocked
   the page. The VMM must scan the page again.
 
-A `STATUS` other than `SUCCESS` does not stop the seamcall. The TDX module skips the page, marks the
-entry, continues with the next one, and can still return `TDX_SUCCESS`. The VMM must check the
-`STATUS` field of each entry.
+**Note**: The specs do not explain why the seamcall skips a dirty page. But it looks like an
+optimization to me: The memory export seamcall does not clear the Dirty bit, so exporting the page
+now would make the next `DSCAN` report it again, and the page would be exported twice.
+
+A `STATUS` other than `SUCCESS` does not stop the seamcall. The TDX module skips the page, sets
+`STATUS` in the GPA list entry and `INVALID` in the HPA list entry, continues with the next one, and
+can still return `TDX_SUCCESS`. The VMM must check the `STATUS` field of each entry.
 
 **Note**: In case of non-blocking export, [TDH.EXPORT.PAUSE](#tdhexportpause) fails with
 `TDX_BLOCKED_MEMORY_EXIST` if the source TD has blocked pages. All of them must leave the blocked

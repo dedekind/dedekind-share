@@ -49,11 +49,7 @@ structures, intended for reference from my other documents.
     - [MBMD](#mbmd)
     - [MBMD-Only Bundles](#mbmd-only-bundles)
     - [State Bundles](#state-bundles)
-      - [Immutable State](#immutable-state)
-      - [TD Mutable State](#td-mutable-state)
-      - [vCPU Mutable State](#vcpu-mutable-state)
     - [Memory Bundle](#memory-bundle)
-      - [MAC Pages](#mac-pages)
   - [Migration Stream](#migration-stream)
   - [Migration Counters](#migration-counters)
 
@@ -192,6 +188,15 @@ fields.
 - Bits 51:12 (`GPA`): [GFN](x86-misc.md#page-numbers-and-page-frames) of the page.
 - Bits 53:52 (`OPERATION`): Action associated with this entry (see below).
 - Bits 60:56 (`STATUS`): Result or status after processing.
+
+Here is a simplified layout of the entry.
+
+```text
+  63:61   60:56    55:54     53:52      51:12    11:10    9:7     6:5    4:3       2       1:0
++-------+--------+-------+-----------+---------+-------+--------+-----+-------+---------+-------+
+|   0   | STATUS |   0   | OPERATION |   GPA   |   0   | L2_MAP |  0  | STATE | PENDING | LEVEL |
++-------+--------+-------+-----------+---------+-------+--------+-----+-------+---------+-------+
+```
 
 ### GPA_LIST_INFO
 
